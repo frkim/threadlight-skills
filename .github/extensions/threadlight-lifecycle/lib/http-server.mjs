@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CSP =
   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'";
@@ -20,7 +21,7 @@ const CONTENT_TYPES = new Map([
 function normalizeRoot(webRoot) {
   const root =
     webRoot instanceof URL
-      ? decodeURIComponent(webRoot.pathname)
+      ? fileURLToPath(webRoot)
       : String(webRoot);
   return path.resolve(root);
 }

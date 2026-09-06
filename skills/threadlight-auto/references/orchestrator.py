@@ -34,6 +34,7 @@ import hashlib
 import json
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -556,38 +557,68 @@ def _governed_actions_projection(workspace: Path) -> tuple[dict[str, str] | None
 
 
 def _file_age_seconds(p: Path) -> float | None:
-    if not p.exists():
+    """Return the age of a regular file, or None when missing/not a file."""
+    try:
+        metadata = p.stat()
+    except FileNotFoundError:
         return None
-    return (datetime.now(timezone.utc) - datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)).total_seconds()
+    if not stat.S_ISREG(metadata.st_mode):
+        return None
+    return datetime.now(timezone.utc).timestamp() - metadata.st_mtime
 
 
 def _sha256(p: Path) -> str | None:
-    if not p.exists():
+    try:
+        content = p.read_bytes()
+    except FileNotFoundError:
         return None
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    return hashlib.sha256(content).hexdigest()
+
+
+def _freshness_error(age: float) -> str | None:
+    if age < 0:
+        return "is in the future"
+    if age >= FRESHNESS_SECONDS:
+        return f"is {int(age/3600)} h old (>= 24 h)"
+    return None
+
+
+def _stage_state_error(state: Any, stage: str) -> str | None:
+    if not isinstance(state, dict):
+        return "Planner state is unreadable or not a JSON object; re-running."
+    if stage in state and not isinstance(state[stage], dict):
+        return f"Planner state for {stage} must be a JSON object; re-running."
+    return None
 
 
 def _check_preflight(workspace: Path, _: dict[str, Any]) -> StageDecision:
     marker = workspace / PREFLIGHT_MARKER
-    age = _file_age_seconds(marker)
+    try:
+        age = _file_age_seconds(marker)
+    except OSError as exc:
+        return StageDecision(
+            "preflight", "run", f"Preflight marker is unreadable ({exc}); re-running.",
+            artifacts_seen=[PREFLIGHT_MARKER],
+        )
     if age is None:
         return StageDecision(
             "preflight",
             "run",
-            "No preflight marker; bootstrap must run.",
+            "Preflight marker missing or not a regular file; bootstrap must run.",
             artifacts_missing=[str(PREFLIGHT_MARKER)],
         )
-    if age > FRESHNESS_SECONDS:
+    freshness_error = _freshness_error(age)
+    if freshness_error:
         return StageDecision(
             "preflight",
             "run",
-            f"Preflight marker is {int(age/3600)} h old (> 24 h); re-running.",
+            f"Preflight marker {freshness_error}; re-running.",
             artifacts_seen=[str(PREFLIGHT_MARKER)],
         )
 
     try:
         marker_data = json.loads(marker.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
         return StageDecision(
             "preflight",
             "run",
@@ -603,7 +634,13 @@ def _check_preflight(workspace: Path, _: dict[str, Any]) -> StageDecision:
         )
 
     foundation = workspace / "specs" / "foundation.md"
-    current_foundation_hash = _sha256(foundation)
+    try:
+        current_foundation_hash = _sha256(foundation)
+    except OSError as exc:
+        return StageDecision(
+            "preflight", "run", f"Foundation is unreadable ({exc}); re-running runtime-policy validation.",
+            artifacts_seen=[PREFLIGHT_MARKER, "specs/foundation.md"],
+        )
     if "foundation_sha256" not in marker_data:
         return StageDecision(
             "preflight",
@@ -627,14 +664,21 @@ def _check_preflight(workspace: Path, _: dict[str, Any]) -> StageDecision:
     )
 
 
-def _check_design(workspace: Path, state: dict[str, Any]) -> StageDecision:
+def _check_design(workspace: Path, state: dict[str, Any] | None) -> StageDecision:
     spec = workspace / "specs" / "SPEC.md"
-    if not spec.exists():
+    try:
+        content = spec.read_bytes()
+        text = content.decode("utf-8")
+    except FileNotFoundError:
         return StageDecision(
             "design", "run", "specs/SPEC.md does not exist.", artifacts_missing=["specs/SPEC.md"]
         )
+    except (OSError, UnicodeDecodeError) as exc:
+        return StageDecision(
+            "design", "run", f"specs/SPEC.md is unreadable ({exc}); re-running.",
+            artifacts_seen=["specs/SPEC.md"],
+        )
 
-    text = spec.read_text(encoding="utf-8")
     if "[NEEDS CLARIFICATION:" in text:
         return StageDecision(
             "design",
@@ -644,8 +688,19 @@ def _check_design(workspace: Path, state: dict[str, Any]) -> StageDecision:
             hard_stop_signature="NEEDS CLARIFICATION marker in SPEC.md",
         )
 
-    current_hash = _sha256(spec)
-    last_hash = state.get("design", {}).get("artifact_hash")
+    state_error = _stage_state_error(state, "design")
+    if state_error:
+        return StageDecision("design", "run", state_error, artifacts_seen=["specs/SPEC.md"])
+    current_hash = hashlib.sha256(content).hexdigest()
+    design_state = state.get("design", {})
+    last_hash = design_state.get("artifact_hash")
+    if "artifact_hash" in design_state and (
+        not isinstance(last_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", last_hash)
+    ):
+        return StageDecision(
+            "design", "run", "Planner state design.artifact_hash is not a SHA-256 hash; re-running.",
+            artifacts_seen=["specs/SPEC.md"],
+        )
     if last_hash and current_hash == last_hash:
         return StageDecision(
             "design",
@@ -844,19 +899,26 @@ def _check_safe_check(workspace: Path, _: dict[str, Any]) -> StageDecision:
 
 def _check_invoke(workspace: Path, _: dict[str, Any]) -> StageDecision:
     invoke_doc = workspace / "docs" / "invoke-results.md"
-    age = _file_age_seconds(invoke_doc)
+    try:
+        age = _file_age_seconds(invoke_doc)
+    except OSError as exc:
+        return StageDecision(
+            "invoke", "run", f"docs/invoke-results.md is unreadable ({exc}); re-running.",
+            artifacts_seen=["docs/invoke-results.md"],
+        )
     if age is None:
         return StageDecision(
             "invoke",
             "run",
-            "docs/invoke-results.md missing — demo scenarios not yet run.",
+            "docs/invoke-results.md missing or not a regular file — demo scenarios must run.",
             artifacts_missing=["docs/invoke-results.md"],
         )
-    if age > FRESHNESS_SECONDS:
+    freshness_error = _freshness_error(age)
+    if freshness_error:
         return StageDecision(
             "invoke",
             "run",
-            f"docs/invoke-results.md is {int(age/3600)} h old (> 24 h); re-running.",
+            f"docs/invoke-results.md {freshness_error}; re-running.",
             artifacts_seen=["docs/invoke-results.md"],
         )
     return StageDecision(
@@ -906,23 +968,21 @@ def _load_profile_complete(spec_text: str) -> bool:
     return _LOAD_PROFILE_REQUIRED_KEYS.issubset(found)
 
 
-def _parse_iso(ts: str) -> datetime | None:
+def _parse_iso(ts: Any) -> datetime | None:
     """Parse ISO-8601 UTC timestamp, return None on failure."""
-    if not ts or not RFC3339_UTC_OR_OFFSET.fullmatch(ts):
+    if not isinstance(ts, str) or not RFC3339_UTC_OR_OFFSET.fullmatch(ts):
         return None
     try:
         parsed = datetime.fromisoformat(ts.replace("Z", "+00:00").replace("z", "+00:00"))
-    except (ValueError, TypeError):
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return parsed.astimezone(timezone.utc)
 
 
 def _parse_json_object(path: Path) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -944,7 +1004,8 @@ def _validate_leg_capabilities(
         capability = capabilities.get(capability_name)
         if not isinstance(capability, dict):
             return _capability_error(manifest_rel, capability_name, "must be an object")
-        if capability.get("status") not in _CAPABILITY_STATUSES:
+        status = capability.get("status")
+        if not isinstance(status, str) or status not in _CAPABILITY_STATUSES:
             return _capability_error(manifest_rel, capability_name, "has invalid status")
         for field in ("evidence", "hint"):
             if field in capability and capability[field] is not None and not isinstance(capability[field], str):
@@ -952,7 +1013,12 @@ def _validate_leg_capabilities(
         if contract.get("require_check_id") and not isinstance(capability.get("check_id"), str):
             return _capability_error(manifest_rel, capability_name, "missing or invalid check_id")
         if "finding_id" in capability:
-            if not contract.get("allow_finding_id") or capability["finding_id"] not in _REDTEAM_FINDING_IDS:
+            finding_id = capability["finding_id"]
+            if (
+                not contract.get("allow_finding_id")
+                or not isinstance(finding_id, str)
+                or finding_id not in _REDTEAM_FINDING_IDS
+            ):
                 return _capability_error(manifest_rel, capability_name, "has invalid finding_id")
         if contract.get("forbid_extra_fields"):
             allowed_fields = {"status", "evidence", "hint"}
@@ -973,41 +1039,56 @@ def _postdeploy_age_seconds(path: Path, payload: dict[str, Any]) -> float | None
     return (datetime.now(timezone.utc) - checked_at).total_seconds()
 
 
-def _check_cost_projection(workspace: Path, state: dict[str, Any]) -> StageDecision:
+def _check_cost_projection(workspace: Path, state: dict[str, Any] | None) -> StageDecision:
     cost_manifest = workspace / "specs" / "cost-manifest.json"
     spec_path = workspace / "specs" / "SPEC.md"
+    state_error = _stage_state_error(state, "cost_projection")
+    if state_error:
+        return StageDecision("cost_projection", "run", state_error)
+    cost_state = state.get("cost_projection", {})
 
     # --- read relevant inputs ---
     spec_text = ""
     if spec_path.exists():
         try:
             spec_text = spec_path.read_text(encoding="utf-8")
-        except OSError:
-            pass
+        except (OSError, UnicodeDecodeError) as exc:
+            return StageDecision(
+                "cost_projection", "run", f"specs/SPEC.md is unreadable ({exc}); re-running cost-projection.",
+                artifacts_seen=["specs/SPEC.md"],
+            )
 
     manifest_generated_at: datetime | None = None
     if cost_manifest.exists():
-        try:
-            import json as _json
-            data = _json.loads(cost_manifest.read_text(encoding="utf-8"))
+        data = _parse_json_object(cost_manifest)
+        if data is not None:
             schema_version = data.get("schema_version")
             if isinstance(schema_version, str) and schema_version.startswith("1."):
                 manifest_generated_at = _parse_iso(data.get("generated_at", ""))
-        except (OSError, ValueError):
-            pass
 
     # --- resumability check ---
     # Skip if: load_profile{} complete AND manifest generated after last deploy
-    last_deploy_ts: str = state.get("cost_projection", {}).get("last_deploy_at", "") or ""
-    if not last_deploy_ts:
+    last_deploy_ts = cost_state.get("last_deploy_at", "")
+    if "last_deploy_at" in cost_state and _parse_iso(last_deploy_ts) is None:
+        return StageDecision(
+            "cost_projection", "run",
+            "Planner state cost_projection.last_deploy_at is not a valid timestamp; re-running.",
+        )
+    if "last_deploy_at" not in cost_state:
         # Fall back to reading azd env AZURE_LAST_DEPLOY_AT
         azure_dir = workspace / ".azure"
-        if azure_dir.exists():
-            for envfile in azure_dir.glob("*/.env"):
-                for line in (envfile.read_text(encoding="utf-8", errors="ignore")).splitlines():
-                    if line.startswith("AZURE_LAST_DEPLOY_AT="):
-                        last_deploy_ts = line.split("=", 1)[1].strip().strip('"')
-                        break
+        try:
+            if azure_dir.exists():
+                for envfile in azure_dir.glob("*/.env"):
+                    for line in envfile.read_text(encoding="utf-8").splitlines():
+                        if line.startswith("AZURE_LAST_DEPLOY_AT="):
+                            last_deploy_ts = line.split("=", 1)[1].strip().strip('"')
+                            break
+        except (OSError, UnicodeDecodeError) as exc:
+            return StageDecision(
+                "cost_projection", "run",
+                f"AZURE_LAST_DEPLOY_AT evidence is unreadable ({exc}); re-running cost-projection.",
+            )
 
     last_deploy_dt = _parse_iso(last_deploy_ts)
 
@@ -1017,7 +1098,7 @@ def _check_cost_projection(workspace: Path, state: dict[str, Any]) -> StageDecis
         and last_deploy_dt is not None
         and manifest_generated_at > last_deploy_dt
     ):
-        passed_at = state.get("cost_projection", {}).get("passed_at", "")
+        passed_at = cost_state.get("passed_at", "")
         return StageDecision(
             "cost_projection",
             "skip",
@@ -1114,7 +1195,7 @@ def _check_leg_manifest(workspace: Path, stage: str) -> StageDecision:
             artifacts_seen=[manifest_rel],
         )
     verdict = manifest_data.get("verdict")
-    if verdict not in contract["known_verdicts"]:
+    if not isinstance(verdict, str) or verdict not in contract["known_verdicts"]:
         return StageDecision(
             stage,
             "run",
@@ -1136,17 +1217,6 @@ def _check_leg_manifest(workspace: Path, stage: str) -> StageDecision:
             f"{manifest_rel} capabilities are missing or invalid; re-running {skill}.",
             artifacts_seen=[manifest_rel],
         )
-    validator = _ASSURANCE_MANIFEST_VALIDATORS.get(stage)
-    if validator is not None:
-        try:
-            validator(manifest, manifest_data)
-        except _EvidenceGateError as error:
-            return StageDecision(
-                stage,
-                "run",
-                f"{manifest_rel} failed assurance contract validation ({error}); re-running {skill}.",
-                artifacts_seen=[manifest_rel],
-            )
     required_capabilities = contract.get("required_capabilities")
     if required_capabilities is not None:
         capability_names = set(capabilities)
@@ -1172,18 +1242,30 @@ def _check_leg_manifest(workspace: Path, stage: str) -> StageDecision:
                 f"{capability_error}; re-running {skill}.",
                 artifacts_seen=[manifest_rel],
             )
+    validator = _ASSURANCE_MANIFEST_VALIDATORS.get(stage)
+    if validator is not None:
+        try:
+            validator(manifest, manifest_data)
+        except _EvidenceGateError as error:
+            return StageDecision(
+                stage,
+                "run",
+                f"{manifest_rel} failed assurance contract validation ({error}); re-running {skill}.",
+                artifacts_seen=[manifest_rel],
+            )
     age = (datetime.now(timezone.utc) - captured_at).total_seconds()
-    if age > FRESHNESS_SECONDS:
+    freshness_error = _freshness_error(age)
+    if freshness_error:
         return StageDecision(
             stage,
             "run",
-            f"{manifest_rel} captured_at is {int(age/3600)} h old (> 24 h); re-running {skill}.",
+            f"{manifest_rel} captured_at {freshness_error}; re-running {skill}.",
             artifacts_seen=[manifest_rel],
         )
     return StageDecision(
         stage,
         "skip",
-        f"{manifest_rel} captured_at is {int(max(age, 0)/60)} m old (< 24 h) with verdict={verdict}.",
+        f"{manifest_rel} captured_at is {int(age/60)} m old (< 24 h) with verdict={verdict}.",
         artifacts_seen=[manifest_rel],
     )
 
@@ -1253,14 +1335,19 @@ def _cascade_invalidations(decisions: list[StageDecision]) -> list[StageDecision
 # -----------------------------------------------------------------------------
 
 
-def _read_state(state_path: Path) -> dict[str, Any]:
-    if not state_path.exists():
-        return {}
+def _read_state(state_path: Path) -> dict[str, Any] | None:
+    """Preserve missing state as {}, but never confuse corrupt state with it."""
     try:
-        return json.loads(state_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        print(f"WARN: {state_path} is not valid JSON ({exc}); treating as empty.", file=sys.stderr)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(f"WARN: {state_path} is unreadable or invalid JSON ({exc}); re-running stages.", file=sys.stderr)
+        return None
+    if not isinstance(state, dict):
+        print(f"WARN: {state_path} is not a JSON object; re-running stages.", file=sys.stderr)
+        return None
+    return state
 
 
 def decide(workspace: Path, state_path: Path | None = None) -> dict[str, Any]:
@@ -1268,7 +1355,15 @@ def decide(workspace: Path, state_path: Path | None = None) -> dict[str, Any]:
     decisions: list[StageDecision] = []
     for stage in STAGES:
         probe = STAGE_PROBES[stage]
-        decisions.append(probe(workspace, state))
+        decision = probe(workspace, state)
+        state_error = _stage_state_error(state, stage)
+        if state_error and decision.decision != "hard_stop":
+            decision = StageDecision(
+                stage, "run", state_error,
+                artifacts_seen=decision.artifacts_seen,
+                artifacts_missing=decision.artifacts_missing,
+            )
+        decisions.append(decision)
     decisions = _cascade_invalidations(decisions)
 
     hard_stop = next((d for d in decisions if d.decision == "hard_stop"), None)

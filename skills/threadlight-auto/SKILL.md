@@ -273,10 +273,22 @@ when ALL conditions hold:
 | Deploy | `azure.yaml` + `infra/main.bicep` exist AND `azd env get-values \| grep -q AGENT_FQDN` AND first-listed agent `status: active` via `azd ai agent show` |
 | Safe-check | `tests/postdeploy-manifest.json` has a fresh RFC3339 `checked_at` (`< 24 h` old) and valid JSON with `phase=post-deploy` and `gaps=[]`; `docs/safe-check-post.md` is optional human-readable evidence only |
 | Cost-projection | SPEC § 12 `load_profile{}` is complete (all required keys filled, no `TBD` placeholders) AND `specs/cost-manifest.json.schema_version` starts with `1.` AND `generated_at > AZURE_LAST_DEPLOY_AT` (the planner trusts `specs/cost-manifest.json.generated_at` vs `AZURE_LAST_DEPLOY_AT`; `.threadlight/auto-state.json[cost_projection].passed_at` is recorded for audit/echo only and is not used as a skip gate) |
+| Invoke | `docs/invoke-results.md` is a regular file with mtime `< 24 h` old |
 | Evals (Discover) | `specs/evals-manifest.json` has schema `threadlight-evals-manifest/v1`, a parseable `captured_at`, and a known verdict (`comprehensive` / `partial` / `offline-only` / `none`) captured `< 24 h` ago (re-runs when a fresh deploy/invoke cascades) |
 | Red-team (Discover) | `specs/redteam-manifest.json` has schema `threadlight-redteam-manifest/v1`, a parseable `captured_at`, and a known verdict (`hardened` / `partial` / `vulnerable`) captured `< 24 h` ago |
 | Govern (Protect) | `specs/govern-manifest.json` has schema `threadlight-govern-manifest/v2`, a parseable `captured_at`, and a known verdict (`governed` / `partial` / `ungoverned`) captured `< 24 h` ago |
 | Sell (optional) | `docs/{seller-prep.md,demo-rehearsal.md}` exist |
+
+Automatic 24-hour freshness gates require `0 <= age < 24 h`: future-dated
+evidence and evidence exactly 24 hours old must re-run. This does not change
+Cost-projection's separate deploy-bound timestamp comparison or manual handoffs.
+
+Missing state (or an absent Design hash) preserves the manual-SPEC skip when
+SPEC has no clarification markers. Unreadable/invalid JSON state or a non-object
+root emits a warning and re-runs stages; a malformed known stage record or
+unusable recorded Design hash/deploy timestamp re-runs that stage. The planner
+does not replace corrupt state with a successful manual-write assumption.
+Unknown keys are preserved, and only the guidance/agent owner repairs state.
 
 If a stage's freshness check fails, that stage AND all downstream stages re-run
 (Design change invalidates Deploy; Deploy change invalidates Safe-check; etc.).

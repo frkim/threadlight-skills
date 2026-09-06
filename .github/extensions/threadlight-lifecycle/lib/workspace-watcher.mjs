@@ -35,6 +35,27 @@ export async function watchWorkspace(
 ) {
   const watchers = new Map();
   let timer = null;
+  let closed = false;
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    clearTimeout(timer);
+    timer = null;
+    const acquired = [...watchers.values()];
+    watchers.clear();
+    const errors = [];
+    for (const watcher of acquired) {
+      try {
+        watcher.close();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length) {
+      throw new AggregateError(errors, "Workspace watcher cleanup failed");
+    }
+  }
 
   function isIgnorableAzureError(error) {
     return (
@@ -47,6 +68,7 @@ export async function watchWorkspace(
 
   async function attachRoots() {
     for (const root of WATCH_ROOTS) {
+      if (closed) return;
       const target = path.join(workspace, root);
       let attached;
       try {
@@ -60,7 +82,7 @@ export async function watchWorkspace(
         }
         throw error;
       }
-      if (root === ".azure") {
+      if (!closed && root === ".azure") {
         if (!attached) {
           continue;
         }
@@ -70,6 +92,7 @@ export async function watchWorkspace(
   }
 
   async function attachTarget(target, { rejectSymlinks = false, requireDirectory = false } = {}) {
+    if (closed) return false;
     if (watchers.has(target)) {
       return true;
     }
@@ -93,16 +116,18 @@ export async function watchWorkspace(
       }
     }
 
-    watchers.set(
-      target,
-      watch(target, { persistent: false }, (eventType, filename) => {
-        void schedule(target, filename);
-      }),
-    );
+    // Other attachment passes or close() may have completed during the awaits.
+    if (closed) return false;
+    if (watchers.has(target)) return true;
+    const watcher = watch(target, { persistent: false }, (eventType, filename) => {
+      void schedule(target, filename);
+    });
+    watchers.set(target, watcher);
     return true;
   }
 
   async function attachAzureEnvDirs(azureRoot) {
+    if (closed) return;
     let entries;
     try {
       entries = await readdir(azureRoot, { withFileTypes: true });
@@ -113,6 +138,7 @@ export async function watchWorkspace(
       throw error;
     }
 
+    if (closed) return;
     await Promise.all(
       entries
         .filter((entry) => entry.isDirectory())
@@ -155,29 +181,40 @@ export async function watchWorkspace(
   }
 
   async function schedule(target, filename) {
-    if (await shouldIgnoreEvent(target, filename)) {
+    if (closed) return;
+    try {
+      if (await shouldIgnoreEvent(target, filename)) return;
+    } catch (error) {
+      if (!closed) await onError(error);
       return;
     }
+    if (closed) return;
     clearTimeout(timer);
     timer = setTimeout(async () => {
+      timer = null;
+      if (closed) return;
       try {
         await attachRoots();
-        await onChange();
+        if (!closed) await onChange();
       } catch (error) {
-        await onError(error);
+        if (!closed) await onError(error);
       }
     }, debounceMs);
   }
 
-  await attachRoots();
+  try {
+    await attachRoots();
+  } catch (error) {
+    try {
+      close();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Workspace watcher initialization and cleanup failed",
+      );
+    }
+    throw error;
+  }
 
-  return {
-    close() {
-      clearTimeout(timer);
-      for (const watcher of watchers.values()) {
-        watcher.close();
-      }
-      watchers.clear();
-    },
-  };
+  return { close };
 }

@@ -2,9 +2,10 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const { readText } = require('./test-portability.js');
 
 const repoRoot = path.join(__dirname, '../..');
-const read = (rel) => fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+const read = (rel) => readText(path.join(repoRoot, rel));
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function extractBetweenHeadings(text, startHeading, endHeading) {
@@ -33,6 +34,41 @@ function extractProducerSectionHeading(text, number) {
   const match = text.match(new RegExp(`out\\.append\\("## ${number}\\. ([^"]+)"\\)`));
   assert.ok(match, `expected producer heading for section ${number}`);
   return match[1];
+}
+
+for (const [label, eol] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+  test(`publication reader preserves fenced content and heading boundaries with ${label}`, (t) => {
+    const relativePath = 'publication-reader-fixture.md';
+    const filePath = path.join(repoRoot, relativePath);
+    const content = [
+      '## Start',
+      '',
+      '```text',
+      '  threadlight-design',
+      '```',
+      '',
+      '## End',
+      'Excluded from the section.',
+      '',
+    ].join('\n');
+    const originalRead = fs.readFileSync;
+    t.mock.method(fs, 'readFileSync', (target, ...args) => {
+      if (target !== filePath) return originalRead(target, ...args);
+      assert.deepStrictEqual(args, ['utf8']);
+      return content.replace(/\n/g, eol);
+    });
+
+    const text = read(relativePath);
+    assert.strictEqual(text, content);
+    assert.strictEqual(
+      extractBetweenHeadings(text, '## Start', '## End'),
+      '## Start\n\n```text\n  threadlight-design\n```\n\n',
+    );
+    assert.throws(
+      () => extractBetweenHeadings(text, '## Start', '## Missing'),
+      /expected block between/,
+    );
+  });
 }
 
 // The single release contract these publication assertions are built from.

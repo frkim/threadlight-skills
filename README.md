@@ -1,129 +1,160 @@
 # Threadlight — Pilot Pipeline Skills
 
-> **A business process becomes a governed working pilot with an evidence-backed path to production.**
->
-> Twenty-two pipeline skills plus one agent-guided lifecycle planner (23 total) take a brief into a governed working pilot. A working session produces the pilot and auditable evidence; production certification, settled Azure actuals, and customer-environment onboarding each have their own timelines.
->
-> SPEC § 14 is the value-model contract: baseline, target, owner, timeframe,
-> measurement source, and maturity policy. Its public arc is forecast →
-> settled Azure actuals → reconciliation → cost per successful interaction.
+**Turn a business-process idea into a governed working pilot, with an
+evidence-backed path to production.**
 
-The paid live workflow has two evidence meanings. **Live smoke** proves the
-design, deployment, invocation, and assurance producers executed; it does not
-assert production readiness. **Readiness proof** additionally requires a green
-post-deploy safe-check, governed/comprehensive/hardened assurance verdicts, a
-ready production scorecard, and measured outcome KPIs.
+Threadlight helps you specify, build, deploy, and assess an AI agent for a real
+business workflow: triaging returns, reviewing claims, or handling approval
+requests. The goal is a working pilot **and evidence of what works, what it
+costs, and what still needs attention** before production.
 
-| Skill | What it does |
-|-------|-------------|
-| [`threadlight-qualify`](skills/threadlight-qualify/) | **No-repo / Cowork qualification & sizing entry — *before* Design.** Turns a declared interview (no Azure, `az`, `azd`, Bicep, Docker, or customer credentials) into a deterministic sizing package — `qualification/sizing.md`, `sizing-manifest.json`, `discovery.md`, optional `roi.md` — and seeds SPEC § 12 `load_profile{}`. **Not a deployed runtime skill.** |
-| [`threadlight-design`](skills/threadlight-design/) | Locks the technical foundation (framework, model, hosting, identity, observability) up front, then produces SPEC.md, demo deck, prep guide, experience page from a brief |
-| [`threadlight-local-test`](skills/threadlight-local-test/) | Boots the agent locally for rapid iteration (Pattern 0 quickstart) |
-| [`threadlight-deploy`](skills/threadlight-deploy/) | 7-phase `azd up` orchestration — ACR, Bicep, hooks, Foundry, Citadel |
-| [`threadlight-safe-check`](skills/threadlight-safe-check/) | Pre/post-deploy gate — validates every resource selector before go-live |
-| [`threadlight-demo-data-factory`](skills/threadlight-demo-data-factory/) | Generates industry-realistic seed data for demos |
-| [`threadlight-event-triggers`](skills/threadlight-event-triggers/) | Wires ACA Jobs, Event Grid, and cron receivers into the deploy lifecycle |
-| [`threadlight-connect`](skills/threadlight-connect/) | **NEW v0.1.0** — the **CONNECT leg** (manual hand-off). Evidence-based swap of a scaffolded **mock** Foundry tool for a **real** endpoint — extracts the contract the tool source actually reads, generates conformance tests, and gates `mock → real` on conformance **AND** OBO user-scoped evidence **AND** required-role revalidation vs the current identity. Config writes need `--apply` + a validated `--real-endpoint`; emits `specs/connect-manifest.json` (INT-001..004). `threadlight-auto` does **not** run it. |
-| [`threadlight-ground`](skills/threadlight-ground/) | **NEW v0.1.0** — the **GROUND leg** (manual hand-off). Assesses caller-supplied ACL / citation / refusal probe evidence into `specs/ground-manifest.json` (GRD-001..004) — a proven ACL leak is `must-fix`, missing/ambiguous evidence is `not-verified` (never guessed). A **coordinator**, not a retrieval engine: it never calls Foundry IQ or runs a live probe. `threadlight-auto` never runs probes. |
-| [`threadlight-hitl-patterns`](skills/threadlight-hitl-patterns/) | Human-in-the-loop gates via Teams Adaptive Cards + audit trail |
-| [`threadlight-workspace-ui`](skills/threadlight-workspace-ui/) | Framework-agnostic vanilla HTML/JavaScript reference patterns behind Easy Auth (not React) |
-| [`threadlight-consumption-iq`](skills/threadlight-consumption-iq/) | Current forecast + read-only actuals + reconciliation + measured cost per successful interaction; actuals are later-pilot. Walks Bicep + `azd env`, reads SPEC § 12 `load_profile{}` (wizard writes it if absent), hits Azure Retail Prices for current SKUs + 2–3 alternatives per resource (AOAI, Foundry, ACA, Cosmos, Storage, APIM, AI Search), emits `docs/cost-projection.md` + `specs/cost-manifest.json`. Soft-advisory; consumed by `production-ready`'s tightened COST-005 + new COST-006. |
-| [`threadlight-evals`](skills/threadlight-evals/) | **NEW v0.1.0** — the **DISCOVER/GOVERN evals leg**. Runs offline batch quality evals (delegates invoke+score to `foundry-evals`), wires **Foundry Continuous Evaluation** on live threads (`create_agent_evaluation` → App Insights), and an **A/B champion–challenger** comparison gate before a model/prompt swap. Emits `specs/evals-manifest.json` that `production-ready` pillar 6 (EVAL-001..004) consumes as leg-verified evidence. |
-| [`threadlight-redteam`](skills/threadlight-redteam/) | **NEW v0.1.0** — the **DISCOVER safety leg**. Runs the **AI Red Teaming Agent** (PyRIT-based) adversarial scan for jailbreak / prompt-injection / data-exfiltration / harmful-content, emits `docs/redteam-report.md` + `specs/redteam-manifest.json`. Maps attack-success-rate to `production-ready` pillar 7 SAFE-101..106 findings. |
-| [`threadlight-govern`](skills/threadlight-govern/) | **NEW v0.1.0** — the **PROTECT/AGT leg**. Wraps `foundry-agt`: scaffolds/validates the agent-runtime governance policy artefact, verifies in-process middleware is wired at the container boundary, and emits a committed verifier report + `specs/govern-manifest.json`. Produces the artefacts `production-ready` pillar 2 (AGT-001..005) and pillar 7 (RAI-002/003) look for. |
-| [`threadlight-governed-actions`](skills/threadlight-governed-actions/) | **NEW v0.1.0** — the **GOVERNED-ACTIONS evidence leg**. Read-only by default: proves whether every *consequential* action the pilot can take is inventoried, mediated, enforced, approved, and auditable, then renders a customer-facing **Governance Evidence Pack**. Inventories declared vs implemented actions, traces mediation across all six execution modes, runs hermetic application-path probes (deny / transform / crash / timeout / malformed verdict / approval replay / output gating / payload-free audit), and assesses the **GitHub Copilot change plane** (PR-only, CODEOWNERS, required checks, SHA pins, OIDC/WIF, identity separation). Emits `tests/governed-actions-manifest.json` + `docs/governance/evidence-pack.md` under `--emit`; the MAF interceptor scaffold needs `--scaffold maf --confirm-scaffold`. **Conformance, not certification** — Agent Hooks is a cooperative alpha, not a security boundary, and this leg does **not** own the production rollout. `production-ready` consumes it as AGT-007 / HITL-008 / SUP-014 evidence. |
-| [`threadlight-production-ready`](skills/threadlight-production-ready/) | Advisory scorecard/handoff, not certification; remediation and deployment are explicit separate choices. BicepGraph parser, 13 pillars, Defender / Policy / quota / restore-drill checks, `--gate-preview`, `--diff`, `--remediate`, `--trend-csv`, OIDC CI. Hard dep on `bicep` CLI; no regex fallback. Pillars 2/6/7 consume the govern/evals/red-team leg manifests when present + fresh, plus the connect/ground/load/upgrade gap-evidence legs. |
-| [`threadlight-loadtest`](skills/threadlight-loadtest/) | **NEW v0.1.0** — the **LOAD leg** (manual, live, cost-bearing). Runs one budget-capped load profile through **k6 / locust** (or an injected adapter) and emits `specs/load-manifest.json` (`threadlight.load/v1`, LOAD-001..003) with real p50/p95/p99 latency, error-rate, and tokens/request evidence. Aborts before any run if the projected cost exceeds `budget_ceiling_usd`, or if a production endpoint lacks explicit `allow_production`; never installs k6/locust; never loops. `threadlight-auto` does **not** run it. |
-| [`threadlight-upgrade`](skills/threadlight-upgrade/) | **NEW v0.1.0** — the **UPGRADE leg** (plan-only). Scans dependency pins, hosted-agent runtime policy, governance profile, and model families against a dated `compatibility-matrix.json` and emits `specs/upgrade-manifest.json` (UPG-001..003) + **one ordered migration plan**. No network calls, no `--apply` — it **never edits the project**. Acting on the plan is a manual, human-driven step. |
-| [`threadlight-cicd`](skills/threadlight-cicd/) | **NEW v0.1.0** — production deploy pipeline + env-setup runbooks for locked-down customer envs (no direct `azd up`). Onboarding-path gate (standalone / spoke-onboard / hub-deploy-then-spoke), then generates **GitHub Actions or Azure DevOps** OIDC/WIF pipelines + UAMI/federated-credential, least-privilege RBAC, and private-VNet runner runbooks. Secret-free; ships a `central-platform-boundary.md` that keeps the pilot pipeline **separate** from `citadel-hub-deploy`. |
-| [`threadlight-customize`](skills/threadlight-customize/) | **NEW v0.1.0** — the **fork-and-customize final leg**. Instructions/runbooks (not automation) for forking the Threadlight pipeline and onboarding it into **one customer's environment** — landing zones, RBAC, pipelines, governance — with **production onboarding priority #1**. Four moves: intake gate (customer-profile workbook), customization map (fork-vs-keep), test-in-customer-env runbook (private-VNet via **Azure ML VS Code** / **GH Codespaces**), and an explicit non-coverage boundary. Ships a fork-runbook (`upstream-pin` + overlay). Manual handoff — `threadlight-auto` does **not** drive it. |
-| [`threadlight-router-bench`](skills/threadlight-router-bench/) | **NEW v0.1.0** — the **IMPROVE leg**. Offline self-improvement cold-path: `learn <run_id>` harvests ONE finished CI run (green *or* red) into a grounded learnings digest — phase parity, a reality-tuned failure taxonomy, and recommendations; optional `bench <candidate> <baseline>` is a paired model-router **cost/quality scorecard** from Azure Monitor token metrics. Offline — `threadlight-auto` does **not** drive it. |
-| [`threadlight-auto`](skills/threadlight-auto/) | **Agent-guided lifecycle planner** — `orchestrator.py` decides, coding agent executes; manual/live/cost-bearing/plan-only legs are handoffs. Reads evidence, chooses the next stage, resumes from `.threadlight/auto-state.json`, and smart-recovers quota/RBAC/ImagePull failures. Does **not** drive the manual legs (qualify, connect, ground, loadtest, upgrade, cicd, customize) or the offline router-bench. |
-| **Threadlight Lifecycle Canvas** | **GitHub Copilot App enhancement** - an outcome-oriented cockpit for all 23 skills. Starts a pilot from a brief, projects progress from canonical artifacts, and sends safe next-action intents back to chat. Optional; existing CLI/Cowork/Coding Agent flows are unchanged. |
+This repository is a **toolkit for an AI coding assistant**, not a standalone
+chatbot or an agent runtime. It packages **22 pipeline skills plus one
+agent-guided lifecycle planner (23 total)**. Each skill supplies instructions
+and, where needed, scripts, templates, and reference material. The assistant
+uses them to create and assess a separate pilot project.
 
-### Canonical lifecycle classification
+**Who it is for:** solution engineers, internal platform teams, and partners
+building enterprise AI pilots. Sellers can use the qualification and design
+skills to explore a use case before involving a deployment engineer.
 
-| Stage class | What runs | Evidence boundary |
-|---|---|---|
-| No-repo entry | qualify; declared evidence, no Azure | sizing only; no runtime artifacts |
-| Agent-guided pilot path | design, optional local test, deploy, safe-check, forecast, invoke, evals, red-team, govern, governed-actions; Auto plans, coding agent executes | pilot evidence and review artifacts |
-| Manual live evidence | connect, ground, load-test | live, customer, and cost-bearing evidence captured by handoff |
-| Optional handoff | production-ready, CI/CD, customize | advisory or deployment/runbook handoffs |
-| Later-pilot evidence | settled actuals and reconciliation | post-pilot value evidence and cost reconciliation |
-| Offline improvement | router-bench and upgrade | finished-run learning and compatibility scans |
+[How it works](#pipeline-flow) · [Get started](#get-started) ·
+[Skill catalog](#skill-catalog) · [Technical briefing](THREADLIGHT.md)
 
 ## Pipeline flow
 
-```
-threadlight-qualify (no-repo / Cowork sizing — before any repo exists) →
-threadlight-design → threadlight-local-test → threadlight-deploy →
-threadlight-safe-check (gate) → threadlight-consumption-iq (cost) →
-CONNECT: threadlight-connect (mock→real tool swap — manual, evidence-gated) →
-DISCOVER: threadlight-evals (offline + online CE) + threadlight-redteam (adversarial scan) +
-          threadlight-ground (ACL / citation / refusal grounding — manual) →
-PROTECT: threadlight-govern (AGT runtime governance) +
-         threadlight-governed-actions (consequential-action mediation evidence — read-only) →
-foundry-observability →
-threadlight-loadtest (budget-capped, production-confirmed load evidence — manual) →
-threadlight-production-ready (advisory; verifies the legs ran) → customer architecture review →
-threadlight-cicd (prod deploy pipeline, when the customer env is locked down) →
-threadlight-customize (fork + onboard into the customer's own environment)
+Threadlight is **specification-first**. The business rules and success criteria
+are written down before the implementation is derived from them.
 
-  ↻ IMPROVE / LIFECYCLE (offline / plan-only, after any CI run):
-    threadlight-router-bench — learnings digest (failure taxonomy + recommendations)
-                               + optional model-router cost/quality scorecard
-    threadlight-upgrade      — plan-only compatibility / preview-drift lifecycle scan (no --apply)
-```
+| Step | What happens | What you get |
+|---|---|---|
+| **1. Qualify** | Capture the workload, expected volume, and potential value. No repository or Azure access is required. | Sizing, discovery notes, and an optional ROI estimate. |
+| **2. Design** | Define the process, business rules, data, tools, governance, and technical foundation. | A durable `specs/SPEC.md`, agent instructions, and demo or pilot materials. |
+| **3. Build and deploy** | Generate sample data, iterate locally, and deploy to an Azure pilot environment, including Microsoft Foundry hosting. | Agent code, infrastructure, and a running endpoint. |
+| **4. Gather evidence** | Check the deployment, invoke scenarios, assess quality and safety, and record governance and cost evidence. | Machine-readable manifests and human-readable reports. |
+| **5. Review and hand off** | Assess production gaps and prepare customer-specific delivery and onboarding guidance. | An advisory readiness scorecard and optional CI/CD pipelines and runbooks. |
+| **6. Improve** | Learn from completed runs, compare cost and quality, and plan dependency or runtime upgrades. | Recommendations for the next iteration, not automatic production changes. |
 
-The spine maps to the Microsoft Responsible-AI-for-Foundry operating loop —
-**Design → Build/Deploy → Discover → Protect → Govern → Improve**. The
-**Discover** legs (`threadlight-evals`, `threadlight-redteam`, and the
-`threadlight-ground` grounding leg) and the **Protect** legs
-(`threadlight-govern` for runtime governance policy, and
-`threadlight-governed-actions` for consequential-action mediation, enforcement,
-approval, and audit evidence) run *before* the readiness gate so that
-`threadlight-production-ready` verifies each control-plane leg actually ran and
-its artefact is fresh, rather than only scoring whether one was declared. The
-loop's **Improve** phase is `threadlight-router-bench` — an offline leg that
-turns a finished CI run into a grounded learnings digest (failure taxonomy +
-recommendations) and, optionally, a model-router cost/quality scorecard, so each
-pilot feeds the next.
+These are lifecycle steps, not one unconditional script. You can invoke an
+individual skill or use `threadlight-auto` to guide the pilot path. Supporting
+features such as human approvals, an operator workspace, and event triggers are
+added when the use case needs them.
 
-`threadlight-qualify` sits *ahead* of the spine as the **no-repo entry**: it is
-Cowork-safe qualification & sizing that runs before any repository exists and
-seeds SPEC § 12 for `threadlight-design`. It is **not a deployed runtime skill**.
-`threadlight-auto` is the **agent-guided lifecycle planner**. It reads the
-latest evidence, chooses the next stage, and hands execution to the coding
-agent. Manual / live / cost-bearing / plan-only legs are explicit handoffs, not
-auto-run steps: **`threadlight-connect`** (mock→real tool swap),
-**`threadlight-ground`** (grounding evidence), **`threadlight-loadtest`**
-(budget-capped load evidence), **`threadlight-cicd`** (pipeline handoff), and
-**`threadlight-customize`** (customer onboarding) stay human-led. The offline
-**`threadlight-router-bench`** improve leg and the plan-only
-**`threadlight-upgrade`** lifecycle scan sit outside the pilot loop entirely.
+### How the skills share context
 
-The full technical briefing is in [`THREADLIGHT.md`](THREADLIGHT.md).
+**Files are the contracts between stages.** Each stage reads the specification
+and relevant evidence produced by earlier stages.
 
-## Starting from a Kratos export
+| Artifact in the pilot project | Purpose |
+|---|---|
+| `specs/SPEC.md` | The business process, requirements, tool contracts, and success criteria. |
+| `specs/foundation.md` and `specs/manifest.json` | Technical decisions and the machine-readable deployment contract. |
+| `AGENTS.md` and `src/agent/skills/` | Agent instructions and workflow-specific skills derived from the specification. |
+| `specs/*-manifest.json`, `tests/*-manifest.json`, and reports | Evidence of completed assessments, including missing or unverified controls. |
+| `.threadlight/auto-state.json` | Saved lifecycle state used when resuming the guided pilot path. |
 
-Threadlight skills also compose on a **Kratos-exported agent project**. An SE
-can run the Kratos `Agent Manager → Deploy tab` export, `azd up` the bundle, then
-layer in Threadlight production-hardening — no rewrite, additive to the
-`threadlight-design` flow above.
+The Python [orchestrator](skills/threadlight-auto/references/orchestrator.py)
+reads state and checks artifact freshness to decide which stages to run, skip,
+or rerun. **The planner decides; the coding assistant executes the skills.**
+A changed specification or stale evidence can cause downstream stages to rerun.
+
+### Canonical lifecycle classification
+
+| Execution mode | Skills or work | Boundary |
+|---|---|---|
+| No-repo entry | `qualify` | Declared inputs only; no Azure access or deployed runtime. |
+| Agent-guided pilot path | `design`, optional `local-test`, `deploy`, `safe-check`, cost forecast, live invocation, `evals`, `redteam`, `govern` | Auto plans; the coding assistant executes. Deployment and live calls require Azure access and incur costs. |
+| Explicit evidence handoffs | `connect`, `ground`, `loadtest`, `governed-actions` | Auto does not execute these skills. Ground assesses supplied evidence; load testing is live and budget-capped; governed-actions is manually invoked and read-only by default. |
+| Optional readiness review | `production-ready` | Advisory assessment, not certification or automatic remediation. |
+| Production handoffs | `cicd`, `customize` | Human-led pipeline setup and customer onboarding, outside Auto. |
+| Later-pilot value evidence | Settled actuals and reconciliation | Real cost and outcome measurements arrive after usage. |
+| Offline improvement | `router-bench`, `upgrade` | Finished-run learning and plan-only compatibility scans, outside Auto. |
+
+The optional [Threadlight Lifecycle Canvas](.github/extensions/threadlight-lifecycle/README.md)
+adds a progress panel in GitHub Copilot App. It reads pilot artifacts and sends
+validated next-action requests back to chat; it does not execute stages or
+Azure operations directly. CLI and other skill-based workflows do not require it.
+
+## What "working" and "ready" mean
+
+**A working pilot is not automatically production-ready.** Assessments use
+recorded evidence, including its freshness, rather than just checking whether
+a control was declared. Missing evidence stays unverified.
+
+The paid live workflow distinguishes two outcomes:
+
+| Outcome | What it establishes |
+|---|---|
+| **Live smoke** | Design, deployment, invocation, and assurance producers executed. It does **not** establish production readiness. |
+| **Readiness proof** | Also requires a green post-deploy safe-check, governed/comprehensive/hardened assurance verdicts, a ready production scorecard, and measured outcome KPIs. |
+
+Even a ready scorecard is **advisory, not production certification**.
+Remediation, architecture review, customer approvals, and production deployment
+remain separate decisions. Agent Hooks is a cooperative alpha, not a security
+boundary; governed-action evidence demonstrates conformance, not certification.
+
+Business value is also measured, not assumed. **SPEC § 14** records the baseline,
+target, owner, timeframe, measurement source, and maturity policy. The value
+evidence progresses from a forecast to **settled Azure actuals**, reconciliation,
+and **cost per successful interaction**. Those actuals and customer-environment
+onboarding have their own timelines beyond the initial pilot.
+
+## Example: retail returns triage
+
+The [returns-triage example](examples/returns-triage-governed/README.md) shows
+what the pipeline produces. Given a return or order ID, the agent correlates
+order, return, and customer records, applies return-policy rules, and recommends
+approval, denial, escalation, or requesting more information, with policy
+citations and an audit record.
+
+It includes the specification, sample data, agent code, infrastructure, and
+governance reports. **It is a sanitized historical run capture, not a template
+you can deploy unchanged.** Its committed assessment explicitly reports
+remaining production-readiness gaps.
+
+## Get started
+
+You do not need to learn all 23 skill names. Choose an entry point:
+
+| Your starting point | Start with |
+|---|---|
+| An idea that needs sizing and discovery | [`threadlight-qualify`](skills/threadlight-qualify/SKILL.md), before creating a repository. |
+| A business brief that needs a specification | [`threadlight-design`](skills/threadlight-design/SKILL.md). |
+| A pilot you want the coding assistant to guide through the lifecycle | [`threadlight-auto`](skills/threadlight-auto/SKILL.md), after reviewing its deployment prerequisites. |
+| An existing deployed pilot | [`threadlight-safe-check`](skills/threadlight-safe-check/SKILL.md), then the relevant assessment skills. |
+| An exported Kratos agent project | The [Kratos bridge](#starting-from-a-kratos-export); do not regenerate its runtime. |
+
+### Install
+
+With GitHub Copilot CLI installed, add the released plugin:
 
 ```bash
-unzip <use-case>-foundry-agent.zip && cd <use-case>-agent
-azd auth login
-azd up -e <use-case>-prod
+copilot plugin marketplace add aiappsgbb/threadlight-skills
+copilot plugin install threadlight-skills@threadlight-skills
 ```
 
-Then invoke, in order: `threadlight-safe-check` → `threadlight-deploy`
-(Kratos-export mode: enrich/validate + backfill `evals/`) → `foundry-evals` →
-`threadlight-consumption-iq` → `threadlight-production-ready`, plus on-demand
-`threadlight-hitl-patterns` / `threadlight-event-triggers` /
-`threadlight-workspace-ui`. The canonical reference — detection signal,
-skills-root convention, what's intentionally trimmed, and the full invocation
-order — is in [`docs/KRATOS-BRIDGE.md`](docs/KRATOS-BRIDGE.md).
+Then start Copilot in your intended pilot workspace and ask for a design, for
+example:
+
+> Use threadlight-design to specify a retail returns-triage assistant.
+> It should recommend a decision with a cited policy clause, use mock order
+> and customer data, and leave refund execution to a human. Stop after the
+> specification for review.
+
+The first deliverable is a reviewable `specs/SPEC.md`, not a deployment.
+Continue with local testing or deployment when the specification is ready.
+
+**Before deploying:** install the [companion skills](#companion-skills-in-awesome-gbb)
+and use an environment with the required Azure tooling, credentials,
+permissions, and quota. The [Auto preflight](skills/threadlight-auto/SKILL.md#stage-0--preflight)
+documents the tool versions and tenant/subscription checks. Installing this
+plugin alone does not provide Azure access or a deployment environment.
+
+For an individual skill instead of the plugin:
+
+```bash
+gh skill install aiappsgbb/threadlight-skills threadlight-design
+```
 
 ## Quickstart in GitHub Codespaces
 
@@ -144,13 +175,8 @@ copilot          # start Copilot CLI
 Then just prompt, e.g. *"use threadlight-design to draft a SPEC from this
 brief: …"*.
 
-Prefer the released plugin over the local checkout? Swap in the marketplace
-version any time:
-
-```bash
-copilot plugin marketplace add aiappsgbb/threadlight-skills
-copilot plugin install threadlight-skills@threadlight-skills
-```
+The Codespace uses the local checkout. To use the released version instead,
+follow the [plugin installation](#install) instructions above.
 
 ### In a GitHub cloud sandbox
 
@@ -204,28 +230,7 @@ skills — not a full deploy environment:
   testing patterns.
 - Some MCP/agent tools (e.g. workiq) may not function in a Codespace.
 
-> **Tip:** to let anyone clone this setup with **Use this template**, a repo
-> admin can enable *Settings → Template repository*. That is independent of the
-> devcontainer above — no code change required.
-
-## Install
-
-### As a plugin (recommended)
-
-```bash
-copilot plugin marketplace add aiappsgbb/threadlight-skills
-copilot plugin install threadlight-skills@threadlight-skills
-```
-
-### Individual skills
-
-```bash
-gh skill install aiappsgbb/threadlight-skills threadlight-design
-gh skill install aiappsgbb/threadlight-skills threadlight-deploy
-# ... etc
-```
-
-### Companion skills (in awesome-gbb)
+## Companion skills (in awesome-gbb)
 
 Threadlight skills cross-reference foundry-*, azd-patterns, citadel-*, and
 other skills from [awesome-gbb](https://github.com/aiappsgbb/awesome-gbb).
@@ -246,10 +251,65 @@ Install both plugins for the full pipeline:
 ```bash
 copilot plugin marketplace add aiappsgbb/awesome-gbb
 copilot plugin install awesome-gbb@awesome-gbb
-
-copilot plugin marketplace add aiappsgbb/threadlight-skills
-copilot plugin install threadlight-skills@threadlight-skills
 ```
+
+The commands above add the companion plugin; install Threadlight itself using
+the [installation steps](#install).
+
+## Starting from a Kratos export
+
+Threadlight can also assess and extend a **Kratos-exported agent project**.
+This path bypasses from-scratch design: the deployment skill preserves the
+exported runtime, enriches and validates the project, and fills in evaluation
+artifacts. You can then apply the deployment checks, cost analysis, and
+production-readiness assessment.
+
+Follow the [Kratos bridge guide](docs/KRATOS-BRIDGE.md) for export detection,
+prerequisites, and the invocation order. It is an alternative entry path, not a
+requirement for using Threadlight.
+
+## Skill catalog
+
+All **23 skills** are listed below. Follow a skill link for its prerequisites,
+inputs, outputs, commands, and safety boundaries; the
+[technical briefing](THREADLIGHT.md) explains how they compose.
+
+| Area | Skill | Purpose |
+|---|---|---|
+| Entry | [`threadlight-qualify`](skills/threadlight-qualify/SKILL.md) | Size a workload and capture discovery inputs without a repository or Azure access. |
+| Design | [`threadlight-design`](skills/threadlight-design/SKILL.md) | Turn a brief into a specification, technical foundation, and derived agent instructions. |
+| Build | [`threadlight-demo-data-factory`](skills/threadlight-demo-data-factory/SKILL.md) | Generate industry-realistic sample data. |
+| Build | [`threadlight-local-test`](skills/threadlight-local-test/SKILL.md) | Run the agent locally for rapid iteration. |
+| Build | [`threadlight-hitl-patterns`](skills/threadlight-hitl-patterns/SKILL.md) | Add human-in-the-loop approvals through Teams cards and audit trails. |
+| Build | [`threadlight-workspace-ui`](skills/threadlight-workspace-ui/SKILL.md) | Supply operator-workspace patterns in vanilla HTML and JavaScript behind Easy Auth. |
+| Build | [`threadlight-event-triggers`](skills/threadlight-event-triggers/SKILL.md) | Add scheduled or event-driven execution. |
+| Deploy | [`threadlight-deploy`](skills/threadlight-deploy/SKILL.md) | Orchestrate infrastructure and agent deployment through Azure Developer CLI. |
+| Check | [`threadlight-safe-check`](skills/threadlight-safe-check/SKILL.md) | Validate resource selectors and pre/post-deployment configuration. |
+| Cost | [`threadlight-consumption-iq`](skills/threadlight-consumption-iq/SKILL.md) | Forecast Azure costs, compare options, and later reconcile actuals and unit costs. |
+| Integration | [`threadlight-connect`](skills/threadlight-connect/SKILL.md) | Gate a mock-to-real tool swap on contract, user-scoped authorization, and current-role evidence; writes require explicit apply. |
+| Evidence | [`threadlight-ground`](skills/threadlight-ground/SKILL.md) | Assess supplied access-control, citation, and refusal evidence; does not retrieve data or run live probes. |
+| Evidence | [`threadlight-evals`](skills/threadlight-evals/SKILL.md) | Coordinate offline quality evaluation, continuous evaluation, and model/prompt comparisons. |
+| Evidence | [`threadlight-redteam`](skills/threadlight-redteam/SKILL.md) | Run adversarial safety assessments and report findings. |
+| Governance | [`threadlight-govern`](skills/threadlight-govern/SKILL.md) | Scaffold and validate runtime governance policy and middleware wiring. |
+| Governance | [`threadlight-governed-actions`](skills/threadlight-governed-actions/SKILL.md) | Assess consequential-action mediation, enforcement, approvals, auditability, and repository change controls. Manual and read-only by default. |
+| Evidence | [`threadlight-loadtest`](skills/threadlight-loadtest/SKILL.md) | Capture live latency and error-rate evidence within a budget cap; production endpoints require explicit permission. |
+| Readiness | [`threadlight-production-ready`](skills/threadlight-production-ready/SKILL.md) | Produce an advisory scorecard across 13 pillars, consuming fresh evidence from the other assessments. |
+| Handoff | [`threadlight-cicd`](skills/threadlight-cicd/SKILL.md) | Generate GitHub Actions or Azure DevOps deployment pipelines and secret-free identity/setup runbooks. |
+| Handoff | [`threadlight-customize`](skills/threadlight-customize/SKILL.md) | Guide a customer-specific fork and environment onboarding; runbooks, not automatic rollout. |
+| Improve | [`threadlight-router-bench`](skills/threadlight-router-bench/SKILL.md) | Learn from a completed CI run and optionally compare model-router cost and quality. |
+| Improve | [`threadlight-upgrade`](skills/threadlight-upgrade/SKILL.md) | Compare dependencies and runtime choices with a dated compatibility matrix; emit a plan without applying upgrades. |
+| Coordinate | [`threadlight-auto`](skills/threadlight-auto/SKILL.md) | Plan the next pilot stage from evidence and saved state; the coding assistant executes it. |
+
+## Repository guide
+
+| Path | What to read or inspect |
+|---|---|
+| [`THREADLIGHT.md`](THREADLIGHT.md) | Detailed engineering reference and lifecycle contracts. |
+| [`skills/`](skills/) | Skill instructions, scripts, templates, and per-skill tests. |
+| [`examples/`](examples/) | Captured pilot artifacts, including the returns-triage example. |
+| [`docs/`](docs/) | Published experience pages, guides, and the Kratos bridge. |
+| [Lifecycle Canvas extension](.github/extensions/threadlight-lifecycle/) | Optional Copilot App progress panel. |
+| [`tests/`](tests/) | Cross-cutting documentation, canvas, and browser tests. |
 
 ## Live experience
 

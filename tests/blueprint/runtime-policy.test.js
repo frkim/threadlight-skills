@@ -2,6 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const { readText } = require('./test-portability.js');
 
 const repoRoot = path.join(__dirname, '../..');
 const policyPath = path.join(repoRoot, 'skills/threadlight-design/references/runtime-policy.json');
@@ -42,7 +43,7 @@ const examplePyprojectPath = `${exampleDir}/src/agent/pyproject.toml`;
 const exampleContainerPath = `${exampleDir}/src/agent/container.py`;
 
 function read(relativePath) {
-  return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
+  return readText(path.join(repoRoot, relativePath));
 }
 
 function loadPolicy() {
@@ -229,6 +230,48 @@ function parseCapabilitySignalsBlock(blockText) {
   }
 
   return result;
+}
+
+for (const [label, eol] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+  test(`runtime-policy reader preserves YAML selectors and capability blocks with ${label}`, (t) => {
+    const filePath = path.join(repoRoot, exampleFoundationPath);
+    const content = [
+      '## Runtime',
+      '```yaml',
+      'framework: microsoft-agent-framework',
+      'capability_signals:',
+      '  requires_toolbox: false',
+      '  unresolved_signals:',
+      '    - requires_toolbox',
+      '  source: open-question',
+      '```',
+      '',
+    ].join('\n');
+    const originalRead = fs.readFileSync;
+    t.mock.method(fs, 'readFileSync', (target, ...args) => {
+      if (target !== filePath) return originalRead(target, ...args);
+      assert.deepStrictEqual(args, ['utf8']);
+      return content.replace(/\n/g, eol);
+    });
+
+    const text = read(exampleFoundationPath);
+    assert.strictEqual(text, content);
+    assert.strictEqual(
+      firstValueAfterHeading(text, /^## Runtime$/m, 'framework'),
+      'microsoft-agent-framework',
+    );
+    const block = extractCapabilitySignalsBlock(text);
+    assert.strictEqual(block, content.slice(content.indexOf('capability_signals:'), content.lastIndexOf('\n```')));
+    assert.deepStrictEqual(parseCapabilitySignalsBlock(block), {
+      requires_toolbox: false,
+      unresolved_signals: ['requires_toolbox'],
+      source: 'open-question',
+    });
+    assert.throws(
+      () => firstValueAfterHeading(text, /^## Runtime$/m, 'missing_selector'),
+      /expected key `missing_selector`/,
+    );
+  });
 }
 
 test('runtime policy file declares the supported selectors, compatible combinations, and valid default route', () => {
@@ -1189,7 +1232,7 @@ test('capability_signals is a machine-readable contract block in both foundation
   }
 });
 
-test('capability_signals sample block is byte/structure identical between foundation-template and speckit-template § 11e', () => {
+test('capability_signals sample block is text/structure identical between foundation-template and speckit-template § 11e', () => {
   const foundationContent = read('skills/threadlight-design/references/foundation-template.md');
   const speckitContent = read('skills/threadlight-design/references/speckit-template.md');
 
@@ -1199,7 +1242,7 @@ test('capability_signals sample block is byte/structure identical between founda
   assert.strictEqual(
     foundationBlock,
     speckitBlock,
-    'capability_signals sample block text must be byte-for-byte identical between foundation-template.md § 1 and ' +
+    'capability_signals sample block text must be identical after newline normalization between foundation-template.md § 1 and ' +
       'speckit-template.md § 11e',
   );
 
@@ -1428,7 +1471,7 @@ test('threadlight-deploy describes ghcp-hosted-agents as the canonical runtime i
 test('docs-blueprint workflow paths (pull_request and push) cover every file this runtime-policy suite reads', () => {
   const workflowContent = read('.github/workflows/docs-blueprint.yml');
 
-  // Every distinct file this test suite loads via read()/loadPolicy() —
+  // Every input this suite loads, including its shared test helper —
   // the CI trigger must re-run whenever any of these changes, or a drifted
   // contract doc/example could merge without the guard ever executing.
   const testInputPaths = [
@@ -1437,6 +1480,7 @@ test('docs-blueprint workflow paths (pull_request and push) cover every file thi
       'skills/threadlight-design/references/speckit-template.md',
       'skills/threadlight-design/references/runtime-policy.json',
       '.github/workflows/docs-blueprint.yml',
+      'tests/blueprint/test-portability.js',
       exampleFoundationPath,
       exampleSpecPath,
       exampleAzureYamlPath,

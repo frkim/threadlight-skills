@@ -15,6 +15,7 @@ import {
   createArtifactReader,
 } from "../../.github/extensions/threadlight-lifecycle/lib/artifact-reader.mjs";
 import { SKILL_REGISTRY } from "../../.github/extensions/threadlight-lifecycle/lib/lifecycle-registry.mjs";
+import { denyDirectoryAccess, requireUnreadableDirectory } from "./filesystem-fixture.mjs";
 
 function fixtureUrl(name) {
   return new URL(
@@ -338,7 +339,7 @@ test("reader rejects symlinked azd roots", async () => {
   });
 });
 
-test("reader treats unreadable .azure roots as absent evidence", async () => {
+test("reader treats unreadable .azure roots as absent evidence", async (t) => {
   await withWorkspace("azd-root-unreadable", async ({ workspace, workspacePath }) => {
     await mkdir(new URL(".azure/dev/", workspace), { recursive: true });
     await writeFile(
@@ -349,6 +350,9 @@ test("reader treats unreadable .azure roots as absent evidence", async () => {
     await chmod(fileURLToPath(new URL(".azure/", workspace)), 0o000);
 
     try {
+      if (!(await requireUnreadableDirectory(t, new URL(".azure/", workspace)))) {
+        return;
+      }
       const reader = await createArtifactReader(workspacePath);
 
       assert.equal(await reader.readDir(".azure"), null);
@@ -359,7 +363,7 @@ test("reader treats unreadable .azure roots as absent evidence", async () => {
   });
 });
 
-test("reader treats unreadable azd env directories as absent evidence", async () => {
+test("reader treats unreadable azd env directories as absent evidence", async (t) => {
   await withWorkspace("azd-env-unreadable", async ({ workspace, workspacePath }) => {
     await mkdir(new URL(".azure/dev/", workspace), { recursive: true });
     await writeFile(
@@ -370,6 +374,9 @@ test("reader treats unreadable azd env directories as absent evidence", async ()
     await chmod(fileURLToPath(new URL(".azure/dev/", workspace)), 0o000);
 
     try {
+      if (!(await requireUnreadableDirectory(t, new URL(".azure/dev/", workspace)))) {
+        return;
+      }
       const reader = await createArtifactReader(workspacePath);
 
       assert.equal(await reader.readAzdEnvValue(".azure/dev", "AGENT_FQDN"), null);
@@ -379,7 +386,7 @@ test("reader treats unreadable azd env directories as absent evidence", async ()
   });
 });
 
-test("reader excludes unreadable azd env directories from discovery", async () => {
+test("reader excludes unreadable azd env directories from discovery", async (t) => {
   await withWorkspace("azd-env-filter", async ({ workspace, workspacePath }) => {
     await mkdir(new URL(".azure/dev/", workspace), { recursive: true });
     await mkdir(new URL(".azure/prod/", workspace), { recursive: true });
@@ -391,12 +398,105 @@ test("reader excludes unreadable azd env directories from discovery", async () =
     await chmod(fileURLToPath(new URL(".azure/prod/", workspace)), 0o000);
 
     try {
+      if (!(await requireUnreadableDirectory(t, new URL(".azure/prod/", workspace)))) {
+        return;
+      }
       const reader = await createArtifactReader(workspacePath);
 
       assert.deepEqual(await reader.readDir(".azure"), [".azure/dev"]);
     } finally {
       await chmod(fileURLToPath(new URL(".azure/prod/", workspace)), 0o755).catch(() => {});
     }
+  });
+});
+
+for (const code of ["EACCES", "EPERM"]) {
+  for (const method of ["lstat", "realpath", "stat", "readdir"]) {
+    test(`reader treats ${code} during azd root ${method} as absent discovery`, async (t) => {
+      await withWorkspace("denied-root", async ({ workspace, workspacePath }) => {
+        await mkdir(new URL(".azure/dev/", workspace), { recursive: true });
+        const deniedCalls = denyDirectoryAccess(
+          t,
+          fileURLToPath(new URL(".azure/", workspace)),
+          code,
+          [method],
+        );
+        const reader = await createArtifactReader(workspacePath);
+
+        assert.equal(await reader.readDir(".azure"), null);
+        assert.equal(deniedCalls.length, 1);
+      });
+    });
+  }
+
+  test(`reader handles ${code} for an azd root without reading env values`, async (t) => {
+    await withWorkspace("denied-root-env", async ({ workspace, workspacePath }) => {
+      await mkdir(new URL(".azure/dev/", workspace), { recursive: true });
+      await writeFile(new URL(".azure/dev/.env", workspace), "AGENT_FQDN=denied.example.com\n", "utf8");
+      const deniedCalls = denyDirectoryAccess(
+        t,
+        fileURLToPath(new URL(".azure/", workspace)),
+        code,
+      );
+      const reader = await createArtifactReader(workspacePath);
+
+      assert.equal(await reader.readDir(".azure"), null);
+      assert.equal(await reader.readAzdEnvValue(".azure/dev", "AGENT_FQDN"), null);
+      assert.equal(deniedCalls.length, 2);
+    });
+  });
+
+  test(`reader excludes ${code} env directories while retaining accessible siblings`, async (t) => {
+    await withWorkspace("denied-env", async ({ workspace, workspacePath }) => {
+      await mkdir(new URL(".azure/dev/", workspace), { recursive: true });
+      await mkdir(new URL(".azure/prod/", workspace), { recursive: true });
+      await writeFile(new URL(".azure/dev/.env", workspace), "AGENT_FQDN=readable.example.com\n", "utf8");
+      await writeFile(new URL(".azure/prod/.env", workspace), "AGENT_FQDN=denied.example.com\n", "utf8");
+      const deniedCalls = denyDirectoryAccess(
+        t,
+        fileURLToPath(new URL(".azure/prod/", workspace)),
+        code,
+      );
+      const reader = await createArtifactReader(workspacePath);
+
+      assert.deepEqual(await reader.readDir(".azure"), [".azure/dev"]);
+      assert.equal(await reader.readAzdEnvValue(".azure/prod", "AGENT_FQDN"), null);
+      assert.equal(await reader.readAzdEnvValue(".azure/dev", "AGENT_FQDN"), "readable.example.com");
+      assert.equal(deniedCalls.length, 2);
+      await assert.rejects(reader.readText(".azure/prod/.env"), ArtifactAccessError);
+      await assert.rejects(reader.readAzdEnvValue(".azure/dev", "AZURE_SUBSCRIPTION_ID"), ArtifactAccessError);
+    });
+  });
+
+  for (const method of ["lstat", "realpath", "readFile"]) {
+    test(`reader treats ${code} during azd env file ${method} as absent evidence`, async (t) => {
+      await withWorkspace("denied-env-file", async ({ workspace, workspacePath }) => {
+        await mkdir(new URL(".azure/dev/", workspace), { recursive: true });
+        await writeFile(new URL(".azure/dev/.env", workspace), "AGENT_FQDN=denied.example.com\n", "utf8");
+        const deniedCalls = denyDirectoryAccess(
+          t,
+          fileURLToPath(new URL(".azure/dev/.env", workspace)),
+          code,
+          [method],
+        );
+        const reader = await createArtifactReader(workspacePath);
+
+        assert.deepEqual(await reader.readDir(".azure"), [".azure/dev"]);
+        assert.equal(await reader.readAzdEnvValue(".azure/dev", "AGENT_FQDN"), null);
+        assert.equal(deniedCalls.length, 1);
+      });
+    });
+  }
+}
+
+test("reader propagates unexpected azd filesystem errors", async (t) => {
+  await withWorkspace("unexpected-azd-error", async ({ workspace, workspacePath }) => {
+    await mkdir(new URL(".azure/dev/", workspace), { recursive: true });
+    denyDirectoryAccess(t, fileURLToPath(new URL(".azure/", workspace)), "EIO");
+    const reader = await createArtifactReader(workspacePath);
+
+    await assert.rejects(reader.readDir(".azure"), { code: "EIO" });
+    await assert.rejects(reader.readAzdEnvValue(".azure/dev", "AGENT_FQDN"), { code: "EIO" });
   });
 });
 
