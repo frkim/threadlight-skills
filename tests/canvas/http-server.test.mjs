@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { createLoopbackServer } from "../../.github/extensions/threadlight-lifecycle/lib/http-server.mjs";
 
@@ -94,3 +95,44 @@ test("loopback server can bind an explicit loopback port", async () => {
     await rm(webRoot, { recursive: true, force: true });
   }
 });
+
+for (const rootType of ["file URL", "native string"]) {
+  test(`loopback server serves ${rootType} roots with spaces and encoded characters`, async () => {
+    const webRoot = new URL(
+      `./.fixture-http-root-${process.pid}-${Date.now()}/Canvas%20assets%20%2523%20%23%20%C3%BC/`,
+      import.meta.url,
+    );
+    const fixtureRoot = new URL("../", webRoot);
+    let server;
+
+    await mkdir(webRoot, { recursive: true });
+    await writeFile(new URL("index.html", webRoot), "<title>Encoded root</title>", "utf8");
+    await writeFile(new URL("app.js", webRoot), "window.canvasReady = true;", "utf8");
+    await writeFile(new URL("outside.json", fixtureRoot), '{"private":true}', "utf8");
+
+    try {
+      server = await createLoopbackServer({
+        webRoot: rootType === "file URL" ? webRoot : fileURLToPath(webRoot),
+        getModel: async () => ({ phases: [] }),
+        onIntent: async () => {},
+      });
+
+      const index = await fetch(server.url);
+      assert.equal(index.status, 200);
+      assert.equal(await index.text(), "<title>Encoded root</title>");
+
+      const asset = await fetch(new URL("/app.js", server.origin));
+      assert.equal(asset.status, 200);
+      assert.match(asset.headers.get("content-type"), /javascript/);
+      assert.equal(await asset.text(), "window.canvasReady = true;");
+
+      for (const pathname of ["/..%2Foutside.json", "/..%5Coutside.json"]) {
+        const traversal = await fetch(new URL(pathname, server.origin));
+        assert.equal(traversal.status, 404);
+      }
+    } finally {
+      await server?.close();
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+}

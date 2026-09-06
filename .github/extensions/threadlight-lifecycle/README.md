@@ -1,6 +1,6 @@
 # Threadlight Lifecycle Canvas
 
-Threadlight Lifecycle Canvas is an optional GitHub Copilot App enhancement for the Threadlight skills plugin. It gives operators an outcome-oriented view of the 17-skill lifecycle, projects progress from committed Threadlight artifacts, and sends safe next-action intents back to chat.
+Threadlight Lifecycle Canvas is an optional GitHub Copilot App enhancement for the Threadlight skills plugin. It gives operators an outcome-oriented view of the 23-skill lifecycle, projects progress from committed Threadlight artifacts, and sends safe next-action intents back to chat.
 
 ## Requirements
 

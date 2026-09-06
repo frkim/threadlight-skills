@@ -1,9 +1,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { pythonExecutable } = require('./test-portability.js');
 
 const L = require('../../docs/assets/blueprint-logic.js');
 
@@ -90,10 +90,7 @@ const PREREQUISITES = [
 ];
 
 function makeWorkDir(label) {
-  // A fresh OS-temp scratch directory per run — never a repo-root path — so
-  // a killed/failed run can't leave stray untracked directories behind in
-  // the working tree; cleanup() below removes it fully.
-  return fs.mkdtempSync(path.join(os.tmpdir(), `threadlight-playbook-${label}-`));
+  return fs.mkdtempSync(path.join(__dirname, `.fixture-playbook-${label}-`));
 }
 
 function runGenerator(entries, label) {
@@ -103,7 +100,7 @@ function runGenerator(entries, label) {
   fs.writeFileSync(sourcePath, JSON.stringify(entries, null, 2));
 
   const result = spawnSync(
-    'python3',
+    pythonExecutable(),
     [generatorPath, '--source', sourcePath, '--out', outPath],
     { cwd: repoRoot, encoding: 'utf8' }
   );

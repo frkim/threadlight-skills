@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { projectWorkspace } from "../../.github/extensions/threadlight-lifecycle/lib/projector.mjs";
 import { createIntentBroker } from "../../.github/extensions/threadlight-lifecycle/lib/intents.mjs";
+import { createArtifactReader } from "../../.github/extensions/threadlight-lifecycle/lib/artifact-reader.mjs";
+import { denyDirectoryAccess, requireUnreadableDirectory } from "./filesystem-fixture.mjs";
 import {
   assuranceManifest,
   createWorkspaceFixture,
@@ -691,7 +693,7 @@ test("non-postdeploy 24-hour freshness boundaries remain aligned with threadligh
       now: new Date("2026-08-07T08:00:00Z"),
     });
 
-    assert.equal(findSkill(model, "threadlight-evals").status, "complete");
+    assert.equal(findSkill(model, "threadlight-evals").status, "stale");
   });
 });
 
@@ -719,6 +721,63 @@ async function assertInvalidAssurance({
         .join("\n"),
       expectedMessage,
     );
+  });
+}
+
+for (const kind of ["evals", "redteam", "govern"]) {
+  test(`${kind} assurance requires captured_at within the current 24-hour window`, async (t) => {
+    const cases = [
+      { name: "captured now", capturedAt: NOW.toISOString(), status: "complete" },
+      { name: "just inside expiry", capturedAt: "2026-08-05T09:00:00.001Z", status: "complete" },
+      { name: "exact expiry", capturedAt: "2026-08-05T09:00:00Z", status: "stale" },
+      { name: "expired", capturedAt: "2026-08-05T08:59:59.999Z", status: "stale" },
+      { name: "future", capturedAt: "2026-08-06T09:00:00.001Z", status: "failed", error: /captured_at.*future/ },
+      { name: "future with offset", capturedAt: "2026-08-06T11:00:00.001+02:00", status: "failed", error: /captured_at.*future/ },
+      { name: "invalid date", capturedAt: "2026-02-30T09:00:00Z", status: "failed", error: /invalid 'captured_at'/ },
+      { name: "missing", capturedAt: undefined, status: "failed", error: /invalid 'captured_at'/ },
+    ];
+    for (const { name, capturedAt, status, error } of cases) {
+      await t.test(name, async () => {
+        await withFixture("complete-pilot", async ({ workspace, writeJson }) => {
+          const manifestPath = `specs/${kind}-manifest.json`;
+          await writeJson(manifestPath, assuranceManifest(kind, { captured_at: capturedAt }));
+
+          const model = await projectWorkspace(workspace, { now: NOW });
+
+          assert.equal(findSkill(model, `threadlight-${kind}`).status, status);
+          assert.equal(findSkill(model, "threadlight-safe-check").status, "complete");
+          assert.equal(
+            findSkill(model, "threadlight-production-ready").evidenceState,
+            status === "complete" ? "readiness-proof" : "readiness-incomplete",
+          );
+          if (status !== "complete") {
+            assert.notEqual(findSkill(model, "threadlight-production-ready").status, "complete");
+          }
+          if (error) {
+            const diagnostic = model.errors.find((entry) => entry.path === manifestPath);
+            assert.equal(diagnostic?.code, "artifact-invalid");
+            assert.match(diagnostic.message, error);
+          }
+        });
+      });
+    }
+  });
+
+  test(`${kind} expired partial assurance is stale but negative evidence stays failed`, async () => {
+    await withFixture("complete-pilot", async ({ workspace, writeJson }) => {
+      const manifestPath = `specs/${kind}-manifest.json`;
+      for (const [overrides, expected] of [
+        [{ verdict: "partial", not_verified: ["Pending check"] }, "stale"],
+        [{ must_fix: ["Required fix"] }, "failed"],
+      ]) {
+        await writeJson(manifestPath, assuranceManifest(kind, {
+          captured_at: "2026-08-05T09:00:00Z",
+          ...overrides,
+        }));
+        const model = await projectWorkspace(workspace, { now: NOW });
+        assert.equal(findSkill(model, `threadlight-${kind}`).status, expected);
+      }
+    });
   });
 }
 
@@ -901,11 +960,14 @@ test("assurance manifests accept timezone-qualified ISO timestamps with a space 
   });
 });
 
-test("deploy treats unreadable .azure roots as absent evidence instead of throwing", async () => {
+test("deploy treats unreadable .azure roots as absent evidence instead of throwing", async (t) => {
   await withFixture("complete-pilot", async ({ workspace }) => {
     const azureRoot = path.join(workspace, ".azure");
     try {
       await chmod(azureRoot, 0o000);
+      if (!(await requireUnreadableDirectory(t, azureRoot))) {
+        return;
+      }
       const model = await projectWorkspace(workspace, { now: NOW });
 
       assert.equal(findSkill(model, "threadlight-deploy").status, "running");
@@ -916,11 +978,14 @@ test("deploy treats unreadable .azure roots as absent evidence instead of throwi
   });
 });
 
-test("deploy treats unreadable azd env directories as absent evidence instead of throwing", async () => {
+test("deploy treats unreadable azd env directories as absent evidence instead of throwing", async (t) => {
   await withFixture("complete-pilot", async ({ workspace }) => {
     const envDir = path.join(workspace, ".azure", "dev");
     try {
       await chmod(envDir, 0o000);
+      if (!(await requireUnreadableDirectory(t, envDir))) {
+        return;
+      }
       const model = await projectWorkspace(workspace, { now: NOW });
 
       assert.equal(findSkill(model, "threadlight-deploy").status, "running");
@@ -931,12 +996,15 @@ test("deploy treats unreadable azd env directories as absent evidence instead of
   });
 });
 
-test("deploy ignores unreadable sibling azd env directories when exactly one usable env remains", async () => {
+test("deploy ignores unreadable sibling azd env directories when exactly one usable env remains", async (t) => {
   await withFixture("complete-pilot", async ({ workspace, writeString }) => {
     await writeString(".azure/prod/.env", "AGENT_FQDN=threadlight-prod.example.com\n");
     const unreadableEnvDir = path.join(workspace, ".azure", "prod");
     try {
       await chmod(unreadableEnvDir, 0o000);
+      if (!(await requireUnreadableDirectory(t, unreadableEnvDir))) {
+        return;
+      }
       const model = await projectWorkspace(workspace, { now: NOW });
 
       assert.equal(findSkill(model, "threadlight-deploy").status, "complete");
@@ -946,6 +1014,36 @@ test("deploy ignores unreadable sibling azd env directories when exactly one usa
     }
   });
 });
+
+for (const code of ["EACCES", "EPERM"]) {
+  for (const [name, segments, hasReadableSibling] of [
+    ["root", [".azure"], false],
+    ["only env", [".azure", "dev"], false],
+    ["sibling env", [".azure", "prod"], true],
+  ]) {
+    test(`deploy handles deterministic ${code} at azd ${name}`, async (t) => {
+      await withFixture("complete-pilot", async ({ workspace, writeString }) => {
+        if (hasReadableSibling) {
+          await writeString(".azure/prod/.env", "AGENT_FQDN=denied.example.com\n");
+        }
+        const deniedCalls = denyDirectoryAccess(t, path.join(workspace, ...segments), code);
+        const reader = await createArtifactReader(workspace);
+        const model = await projectWorkspace(workspace, { now: NOW, reader });
+
+        assert.ok(deniedCalls.length > 0);
+        assert.equal(
+          findSkill(model, "threadlight-deploy").status,
+          hasReadableSibling ? "complete" : "running",
+        );
+        assert.equal(
+          findSkill(model, "threadlight-safe-check").status,
+          hasReadableSibling ? "complete" : "blocked",
+        );
+        assert.deepEqual(model.errors, []);
+      });
+    });
+  }
+}
 
 test("threadlight-production-ready does not claim readiness proof when safe-check evidence is stale", async () => {
   await withFixture("complete-pilot", async ({ workspace, writeJson }) => {
@@ -1415,6 +1513,28 @@ test("a short validity window still renders complete inside its own hours", asyn
     }),
   );
   assert.equal(skill.status, "complete");
+});
+
+test("manual live legs retain their inclusive envelope boundary and reject future evidence", async () => {
+  for (const [skillId, schema] of [
+    ["threadlight-connect", "threadlight-connect-manifest/v1"],
+    ["threadlight-ground", "threadlight.ground/v1"],
+    ["threadlight-loadtest", "threadlight.load/v1"],
+    ["threadlight-upgrade", "threadlight.upgrade/v1"],
+  ]) {
+    for (const [generatedAt, expected] of [
+      ["2026-08-06T08:00:00Z", "complete"],
+      ["2026-08-06T07:59:59.999Z", "stale"],
+      ["2026-08-06T09:00:00.001Z", "stale"],
+    ]) {
+      const skill = await projectLeg(skillId, legEnvelope({
+        schema,
+        generatedAt,
+        validForHours: 1,
+      }));
+      assert.equal(skill.status, expected, `${skillId}: ${generatedAt}`);
+    }
+  }
 });
 
 test("a non-integer valid_for_hours is rejected as malformed", async () => {

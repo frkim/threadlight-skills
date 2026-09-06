@@ -581,7 +581,7 @@ function validateRedteamAssurance(manifestPath, value, contract) {
   return validateAssuranceCapabilities(manifestPath, value.capabilities, contract);
 }
 
-function validateAssuranceManifest(manifestPath, value) {
+function validateAssuranceManifest(manifestPath, value, now) {
   const contract = ASSURANCE_CONTRACTS[manifestPath];
   if (!contract) {
     return null;
@@ -601,6 +601,9 @@ function validateAssuranceManifest(manifestPath, value) {
   const capturedAt = parseIsoDatetimeWithTimezone(value.captured_at);
   if (!capturedAt) {
     return invalidAssurance(manifestPath, "missing or invalid 'captured_at'");
+  }
+  if (capturedAt.getTime() > now.getTime()) {
+    return invalidAssurance(manifestPath, "'captured_at' must not be in the future");
   }
   if (!contract.knownVerdicts.has(value.verdict)) {
     return invalidAssurance(
@@ -967,7 +970,7 @@ function readinessEvidenceState(assurance, readiness, safeCheckStatus) {
   return "readiness-proof";
 }
 
-async function skillEvidenceState(definition, reader, manifest, projectedSkills) {
+async function skillEvidenceState(definition, reader, manifest, projectedSkills, now) {
   if (definition.id === "threadlight-consumption-iq") {
     return costEvidenceState(reader, manifest);
   }
@@ -988,21 +991,27 @@ async function skillEvidenceState(definition, reader, manifest, projectedSkills)
     const safeCheckStatus = projectedSkills.get("threadlight-safe-check")?.status ?? null;
     const governValidation =
       govern.state === "present"
-        ? validateAssuranceManifest("specs/govern-manifest.json", govern.value)
+        ? validateAssuranceManifest("specs/govern-manifest.json", govern.value, now)
         : null;
     const evalsValidation =
       evals.state === "present"
-        ? validateAssuranceManifest("specs/evals-manifest.json", evals.value)
+        ? validateAssuranceManifest("specs/evals-manifest.json", evals.value, now)
         : null;
     const redteamValidation =
       redteam.state === "present"
-        ? validateAssuranceManifest("specs/redteam-manifest.json", redteam.value)
+        ? validateAssuranceManifest("specs/redteam-manifest.json", redteam.value, now)
         : null;
     return readinessEvidenceState(
       {
-        govern: governValidation?.valid ? governValidation.verdict : null,
-        evals: evalsValidation?.valid ? evalsValidation.verdict : null,
-        redteam: redteamValidation?.valid ? redteamValidation.verdict : null,
+        govern: governValidation?.valid &&
+          projectedSkills.get("threadlight-govern")?.status === "complete"
+          ? governValidation.verdict : null,
+        evals: evalsValidation?.valid &&
+          projectedSkills.get("threadlight-evals")?.status === "complete"
+          ? evalsValidation.verdict : null,
+        redteam: redteamValidation?.valid &&
+          projectedSkills.get("threadlight-redteam")?.status === "complete"
+          ? redteamValidation.verdict : null,
       },
       readiness.value,
       safeCheckStatus,
@@ -1074,7 +1083,7 @@ function parseError(error) {
   };
 }
 
-function statusWithFreshness(status, definition, timestamp, now, jsonPath = null) {
+function statusWithFreshness(status, definition, timestamp, now) {
   if (
     definition.freshnessHours === null ||
     (status !== "complete" && status !== "running")
@@ -1085,10 +1094,7 @@ function statusWithFreshness(status, definition, timestamp, now, jsonPath = null
     return "stale";
   }
   const ageHours = (now.getTime() - timestamp.getTime()) / 3_600_000;
-  if (jsonPath === "tests/postdeploy-manifest.json") {
-    return ageHours >= definition.freshnessHours ? "stale" : status;
-  }
-  return ageHours > definition.freshnessHours ? "stale" : status;
+  return ageHours >= 0 && ageHours < definition.freshnessHours ? status : "stale";
 }
 
 async function collectEvidence(reader, definition) {
@@ -1295,7 +1301,7 @@ async function projectSkill({
           });
         }
       } else if (jsonExists) {
-        const assuranceValidation = validateAssuranceManifest(jsonPath, json);
+        const assuranceValidation = validateAssuranceManifest(jsonPath, json, now);
         if (assuranceValidation && !assuranceValidation.valid) {
           status = "failed";
           errors.push({
@@ -1339,7 +1345,7 @@ async function projectSkill({
   }
 
   if (!legContract) {
-    status = statusWithFreshness(status, definition, timestamp, now, jsonPath);
+    status = statusWithFreshness(status, definition, timestamp, now);
   }
 
   if (
@@ -1366,6 +1372,7 @@ async function projectSkill({
     reader,
     manifest,
     projectedSkills,
+    now,
   );
 
   if (

@@ -19,6 +19,8 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[3]
 ORCH = REPO / "skills" / "threadlight-auto" / "references" / "orchestrator.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -54,7 +56,7 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _write_json(path: Path, payload: dict) -> None:
+def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -70,6 +72,420 @@ def _write_postdeploy_fixture(tmp_path: Path, payload: dict) -> None:
         **payload,
     }
     _write_json(tmp_path / "tests" / "postdeploy-manifest.json", merged)
+
+
+NON_OBJECT_JSON = [None, [], ["value"], "", "value", 0, 42, False, True, 1.5]
+INVALID_FIELD_JSON = NON_OBJECT_JSON + [{}, {"unexpected": "value"}]
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    now = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(orch, "datetime", FixedDatetime)
+    return now
+
+
+def _assurance_payload(stage, captured_at):
+    contract = orch.LEG_CONTRACTS[stage]
+    payload = {
+        "schema": contract["schema"],
+        "tool_version": "1.0",
+        "captured_at": captured_at,
+        "verdict": {"evals": "offline-only", "redteam": "vulnerable", "govern": "ungoverned"}[stage],
+        "capabilities": {
+            name: {"status": "pass", **({"check_id": f"eval-{index}"} if stage == "evals" else {})}
+            for index, name in enumerate(sorted(contract["required_capabilities"]))
+        },
+        "must_fix": [],
+        "should_fix": [],
+        "not_verified": [],
+    }
+    if stage == "redteam":
+        payload.update({
+            "asr": {"jailbreak": 0.0},
+            "thresholds": {"max_asr": 0.1, "freshness_days": 7, "min_attacks": 10},
+        })
+    return payload
+
+
+@pytest.fixture
+def resumable_workspace(tmp_path, frozen_clock):
+    spec = tmp_path / "specs" / "SPEC.md"
+    spec.parent.mkdir()
+    spec.write_text(
+        "# SPEC\nload_profile:\n"
+        + "".join(f"  {key}: 1\n" for key in sorted(orch._LOAD_PROFILE_REQUIRED_KEYS)),
+        encoding="utf-8",
+    )
+    marker = tmp_path / orch.PREFLIGHT_MARKER
+    _write_json(marker, {"foundation_sha256": None})
+    (tmp_path / "infra").mkdir()
+    (tmp_path / "infra" / "main.bicep").write_text("param location string\n", encoding="utf-8")
+    (tmp_path / "azure.yaml").write_text("name: pilot\n", encoding="utf-8")
+    env_file = tmp_path / ".azure" / "dev" / ".env"
+    env_file.parent.mkdir(parents=True)
+    deploy_at = (frozen_clock - timedelta(hours=1)).isoformat()
+    env_file.write_text(
+        f"AGENT_FQDN=agent.example.test\nAZURE_LAST_DEPLOY_AT={deploy_at}\n", encoding="utf-8"
+    )
+    _write_postdeploy_fixture(tmp_path, {"checked_at": frozen_clock.isoformat(), "phase": "post-deploy", "gaps": []})
+    _write_json(tmp_path / "specs" / "cost-manifest.json", {
+        "schema_version": "1.0", "generated_at": frozen_clock.isoformat(),
+    })
+    invoke = tmp_path / "docs" / "invoke-results.md"
+    invoke.parent.mkdir()
+    invoke.write_text("# Invoke results\n", encoding="utf-8")
+    for path in (marker, invoke):
+        os.utime(path, (frozen_clock.timestamp(), frozen_clock.timestamp()))
+    for stage in orch.LEG_CONTRACTS:
+        _write_json(tmp_path / orch.LEG_CONTRACTS[stage]["manifest"], _assurance_payload(stage, frozen_clock.isoformat()))
+    return {
+        "design": {"artifact_hash": orch._sha256(spec)},
+        "cost_projection": {"last_deploy_at": deploy_at},
+    }
+
+
+@pytest.mark.parametrize("root", NON_OBJECT_JSON)
+def test_invalid_state_root_warns_and_reruns_without_rewriting(tmp_path, resumable_workspace, capsys, root):
+    state_path = tmp_path / orch.DEFAULT_STATE_PATH
+    _write_json(state_path, root)
+    before = state_path.read_bytes()
+
+    report = orch.decide(tmp_path, state_path)
+
+    assert all(d["decision"] == "run" for d in report["decisions"])
+    assert "WARN:" in capsys.readouterr().err
+    assert state_path.read_bytes() == before
+    assert not (tmp_path / orch.DEFAULT_NEXT_PATH).exists()
+
+
+@pytest.mark.parametrize("stage", orch.STAGES)
+@pytest.mark.parametrize("value", NON_OBJECT_JSON)
+def test_invalid_stage_state_cannot_resume(tmp_path, resumable_workspace, stage, value):
+    state = {**resumable_workspace, stage: value}
+    state_path = tmp_path / orch.DEFAULT_STATE_PATH
+    _write_json(state_path, state)
+    before = state_path.read_bytes()
+
+    report = orch.decide(tmp_path, state_path)
+    decision = next(d for d in report["decisions"] if d["stage"] == stage)
+
+    assert decision["decision"] == "run"
+    assert stage in decision["reason"] and "state" in decision["reason"].lower()
+    index = orch.STAGES.index(stage)
+    assert all(d["decision"] == "skip" for d in report["decisions"][:index])
+    assert all(d["decision"] == "run" for d in report["decisions"][index:])
+    assert state_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("stage", ["design", "cost_projection"])
+@pytest.mark.parametrize("value", NON_OBJECT_JSON)
+def test_state_consuming_probes_reject_invalid_stage(tmp_path, resumable_workspace, stage, value):
+    decision = orch.STAGE_PROBES[stage](tmp_path, {stage: value})
+    assert decision.decision == "run"
+    assert "state" in decision.reason.lower()
+
+
+@pytest.mark.parametrize("raw", [b"{broken", b"\xff"])
+def test_unreadable_state_is_not_missing_state(tmp_path, resumable_workspace, capsys, raw):
+    state_path = tmp_path / orch.DEFAULT_STATE_PATH
+    state_path.write_bytes(raw)
+    report = orch.decide(tmp_path, state_path)
+    assert all(d["decision"] == "run" for d in report["decisions"])
+    assert "WARN:" in capsys.readouterr().err
+    assert state_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("error", [PermissionError("denied"), OSError("unavailable")])
+def test_state_read_failure_warns_and_reruns(tmp_path, resumable_workspace, monkeypatch, capsys, error):
+    state_path = tmp_path / orch.DEFAULT_STATE_PATH
+    _write_json(state_path, resumable_workspace)
+    original = Path.read_text
+
+    def fail_state(path, *args, **kwargs):
+        if path == state_path:
+            raise error
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_state)
+    report = orch.decide(tmp_path, state_path)
+    assert all(d["decision"] == "run" for d in report["decisions"])
+    assert "WARN:" in capsys.readouterr().err
+
+
+def test_directory_state_warns_and_reruns(tmp_path, resumable_workspace, capsys):
+    state_path = tmp_path / orch.DEFAULT_STATE_PATH
+    state_path.mkdir()
+    report = orch.decide(tmp_path, state_path)
+    assert all(d["decision"] == "run" for d in report["decisions"])
+    assert "WARN:" in capsys.readouterr().err
+    assert state_path.is_dir()
+
+
+def test_unexpected_state_reader_error_is_not_silently_ignored(tmp_path, monkeypatch):
+    def unexpected_error(path, *args, **kwargs):
+        raise RuntimeError("reader bug")
+
+    monkeypatch.setattr(Path, "read_text", unexpected_error)
+    with pytest.raises(RuntimeError, match="reader bug"):
+        orch._read_state(tmp_path / orch.DEFAULT_STATE_PATH)
+
+
+@pytest.mark.parametrize("state", [None, {}, {"design": {}}, {"future-stage": ["unknown"]}])
+def test_missing_state_preserves_manual_spec_skip(tmp_path, resumable_workspace, capsys, state):
+    state_path = tmp_path / orch.DEFAULT_STATE_PATH
+    if state is not None:
+        _write_json(state_path, state)
+    report = orch.decide(tmp_path, state_path)
+    assert all(d["decision"] == "skip" for d in report["decisions"])
+    assert "manual write" in report["decisions"][1]["reason"]
+    assert not capsys.readouterr().err
+
+
+def test_valid_state_and_unknown_keys_are_preserved(tmp_path, resumable_workspace, capsys):
+    state = {
+        **resumable_workspace,
+        "future-stage": ["opaque", {"extra": True}],
+        "recovery_events": [{"custom": 1}],
+    }
+    state["design"]["extra"] = [None, False]
+    state_path = tmp_path / orch.DEFAULT_STATE_PATH
+    _write_json(state_path, state)
+    before = state_path.read_bytes()
+    assert orch._read_state(state_path) == state
+    report = orch.decide(tmp_path, state_path)
+    assert all(d["decision"] == "skip" for d in report["decisions"])
+    assert state_path.read_bytes() == before
+    assert not capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", INVALID_FIELD_JSON + ["short", "g" * 64])
+def test_design_rejects_unusable_hash(tmp_path, resumable_workspace, value):
+    decision = orch._check_design(tmp_path, {"design": {"artifact_hash": value}})
+    assert decision.decision == "run"
+    assert "artifact_hash" in decision.reason
+
+
+@pytest.mark.parametrize("matches", [False, True])
+def test_design_valid_hash_preserves_drift_decision(tmp_path, resumable_workspace, matches):
+    state = resumable_workspace if matches else {"design": {"artifact_hash": "0" * 64}}
+    decision = orch._check_design(tmp_path, state)
+    assert decision.decision == ("skip" if matches else "run")
+    assert "hash match" in decision.reason if matches else "hash changed" in decision.reason
+
+
+@pytest.mark.parametrize("state", [None, {"design": []}, {"design": {"artifact_hash": 42}}])
+def test_corrupt_state_does_not_mask_design_hard_stop(tmp_path, resumable_workspace, state):
+    spec = tmp_path / "specs" / "SPEC.md"
+    spec.write_text("[NEEDS CLARIFICATION: owner]\n", encoding="utf-8")
+    state_path = tmp_path / orch.DEFAULT_STATE_PATH
+    _write_json(state_path, state)
+    report = orch.decide(tmp_path, state_path)
+    assert report["next_action"]["type"] == "hard_stop"
+    assert report["next_action"]["stage"] == "design"
+
+
+@pytest.mark.parametrize("stage", ["preflight", "invoke", "evals", "redteam", "govern"])
+@pytest.mark.parametrize("age,expected", [(-1, "run"), (0, "skip"), (1, "skip"), (86399, "skip"), (86400, "run"), (86401, "run")])
+def test_automatic_freshness_boundaries(tmp_path, frozen_clock, stage, age, expected):
+    captured = frozen_clock - timedelta(seconds=age)
+    if stage in orch.LEG_CONTRACTS:
+        path = tmp_path / orch.LEG_CONTRACTS[stage]["manifest"]
+        _write_json(path, _assurance_payload(stage, captured.isoformat()))
+    else:
+        path = tmp_path / (orch.PREFLIGHT_MARKER if stage == "preflight" else "docs/invoke-results.md")
+        path.parent.mkdir(parents=True)
+        path.write_text('{"foundation_sha256": null}' if stage == "preflight" else "# Results\n", encoding="utf-8")
+        os.utime(path, (captured.timestamp(), captured.timestamp()))
+
+    decision = orch.STAGE_PROBES[stage](tmp_path, {})
+
+    assert decision.decision == expected
+    if age < 0:
+        assert "future" in decision.reason
+    elif age >= 86400:
+        assert ">= 24 h" in decision.reason
+    elif stage in orch.LEG_CONTRACTS:
+        assert f"verdict={_assurance_payload(stage, '')['verdict']}" in decision.reason
+
+
+@pytest.mark.parametrize("stage,rel", [("preflight", orch.PREFLIGHT_MARKER), ("invoke", "docs/invoke-results.md")])
+def test_mtime_evidence_requires_regular_file(tmp_path, frozen_clock, stage, rel):
+    path = tmp_path / rel
+    path.mkdir(parents=True)
+    os.utime(path, (frozen_clock.timestamp(), frozen_clock.timestamp()))
+    decision = orch.STAGE_PROBES[stage](tmp_path, {})
+    assert decision.decision == "run"
+    assert "regular file" in decision.reason
+
+
+@pytest.mark.parametrize("stage", ["preflight", "invoke", "evals", "redteam", "govern"])
+def test_missing_automatic_evidence_reruns(tmp_path, frozen_clock, stage):
+    decision = orch.STAGE_PROBES[stage](tmp_path, {})
+    assert decision.decision == "run"
+    assert decision.artifacts_missing
+
+
+@pytest.mark.parametrize("stage,method,rel", [
+    ("preflight", "stat", orch.PREFLIGHT_MARKER),
+    ("invoke", "stat", "docs/invoke-results.md"),
+    ("preflight", "read_text", orch.PREFLIGHT_MARKER),
+    ("preflight", "read_bytes", "specs/foundation.md"),
+    ("design", "read_bytes", "specs/SPEC.md"),
+    ("cost_projection", "read_text", "specs/SPEC.md"),
+    ("cost_projection", "read_text", "specs/cost-manifest.json"),
+    ("cost_projection", "read_text", ".azure/dev/.env"),
+    ("evals", "read_text", "specs/evals-manifest.json"),
+    ("redteam", "read_text", "specs/redteam-manifest.json"),
+    ("govern", "read_text", "specs/govern-manifest.json"),
+])
+@pytest.mark.parametrize("error", [PermissionError("denied"), OSError("unavailable")])
+def test_artifact_io_errors_rerun(tmp_path, resumable_workspace, monkeypatch, stage, method, rel, error):
+    target = tmp_path / rel
+    original = getattr(Path, method)
+
+    def fail_target(path, *args, **kwargs):
+        if path == target:
+            raise error
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, method, fail_target)
+    decision = orch.STAGE_PROBES[stage](tmp_path, {})
+    assert decision.decision == "run"
+    assert decision.reason
+
+
+@pytest.mark.parametrize("stage,rel", [
+    ("preflight", orch.PREFLIGHT_MARKER), ("design", "specs/SPEC.md"),
+    ("safe_check", orch.POSTDEPLOY_MANIFEST), ("cost_projection", "specs/SPEC.md"),
+    ("cost_projection", "specs/cost-manifest.json"), ("cost_projection", ".azure/dev/.env"),
+    ("evals", "specs/evals-manifest.json"), ("redteam", "specs/redteam-manifest.json"),
+    ("govern", "specs/govern-manifest.json"),
+])
+def test_invalid_utf8_artifacts_rerun(tmp_path, resumable_workspace, frozen_clock, stage, rel):
+    path = tmp_path / rel
+    path.write_bytes(b"\xff")
+    os.utime(path, (frozen_clock.timestamp(), frozen_clock.timestamp()))
+    decision = orch.STAGE_PROBES[stage](tmp_path, {})
+    assert decision.decision == "run"
+
+
+@pytest.mark.parametrize("stage", ["preflight", "safe_check", "cost_projection", "evals", "redteam", "govern"])
+@pytest.mark.parametrize("raw", ['{"broken"', "[]", "null"])
+def test_malformed_automatic_json_reruns(tmp_path, resumable_workspace, frozen_clock, stage, raw):
+    rel = (
+        orch.PREFLIGHT_MARKER if stage == "preflight"
+        else orch.POSTDEPLOY_MANIFEST if stage == "safe_check"
+        else "specs/cost-manifest.json" if stage == "cost_projection"
+        else orch.LEG_CONTRACTS[stage]["manifest"]
+    )
+    path = tmp_path / rel
+    path.write_text(raw, encoding="utf-8")
+    os.utime(path, (frozen_clock.timestamp(), frozen_clock.timestamp()))
+    decision = orch.STAGE_PROBES[stage](tmp_path, resumable_workspace)
+    assert decision.decision == "run"
+
+
+@pytest.mark.parametrize("change,expected", [
+    ("absent", "skip"), ("matching", "skip"), ("created", "run"), ("edited", "run"), ("removed", "run"),
+])
+def test_preflight_preserves_foundation_binding(tmp_path, frozen_clock, change, expected):
+    foundation = tmp_path / "specs" / "foundation.md"
+    foundation.parent.mkdir()
+    if change in {"matching", "edited", "removed"}:
+        foundation.write_text("# Foundation\n", encoding="utf-8")
+    marker = tmp_path / orch.PREFLIGHT_MARKER
+    _write_json(marker, {"foundation_sha256": orch._sha256(foundation)})
+    os.utime(marker, (frozen_clock.timestamp(), frozen_clock.timestamp()))
+    if change in {"created", "edited"}:
+        foundation.write_text("# Changed foundation\n", encoding="utf-8")
+    elif change == "removed":
+        foundation.unlink()
+    decision = orch._check_preflight(tmp_path, {})
+    assert decision.decision == expected
+
+
+@pytest.mark.parametrize("value", INVALID_FIELD_JSON + [
+    "not-a-time", "2026-02-30T00:00:00Z", "0001-01-01T00:00:00+01:00", "9999-12-31T23:00:00-02:00",
+])
+@pytest.mark.parametrize("stage,field", [
+    ("safe_check", "checked_at"), ("evals", "captured_at"), ("redteam", "captured_at"),
+    ("govern", "captured_at"), ("cost_projection", "generated_at"), ("cost_projection", "last_deploy_at"),
+])
+def test_unusable_timestamp_fields_rerun(tmp_path, resumable_workspace, stage, field, value):
+    state = resumable_workspace
+    if field == "last_deploy_at":
+        state["cost_projection"][field] = value
+    else:
+        rel = (
+            orch.POSTDEPLOY_MANIFEST if stage == "safe_check"
+            else "specs/cost-manifest.json" if stage == "cost_projection"
+            else orch.LEG_CONTRACTS[stage]["manifest"]
+        )
+        path = tmp_path / rel
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload[field] = value
+        _write_json(path, payload)
+    decision = orch.STAGE_PROBES[stage](tmp_path, state)
+    assert decision.decision == "run"
+    assert field in decision.reason
+
+
+@pytest.mark.parametrize("stage,field", [
+    (stage, field) for stage in ("evals", "redteam", "govern") for field in ("verdict", "status")
+] + [("redteam", "finding_id")])
+@pytest.mark.parametrize("value", INVALID_FIELD_JSON)
+def test_unusable_assurance_enum_fields_rerun(tmp_path, frozen_clock, stage, field, value):
+    payload = _assurance_payload(stage, frozen_clock.isoformat())
+    if field == "verdict":
+        payload[field] = value
+    else:
+        first = sorted(payload["capabilities"])[0]
+        payload["capabilities"][first][field] = value
+    _write_json(tmp_path / orch.LEG_CONTRACTS[stage]["manifest"], payload)
+    decision = orch.STAGE_PROBES[stage](tmp_path, {})
+    assert decision.decision == "run"
+    assert field in decision.reason
+
+
+@pytest.mark.parametrize("root", NON_OBJECT_JSON)
+def test_cost_manifest_root_must_be_object(tmp_path, resumable_workspace, root):
+    _write_json(tmp_path / "specs" / "cost-manifest.json", root)
+    decision = orch._check_cost_projection(tmp_path, resumable_workspace)
+    assert decision.decision == "run"
+    assert "cost-manifest.json" in decision.reason
+
+
+@pytest.mark.parametrize("generated_delta,deploy_delta,expected", [
+    (-86400, -172800, "skip"), (86400, 3600, "skip"), (0, 0, "run"), (-1, 0, "run"), (1, 0, "skip"),
+])
+def test_cost_retains_deploy_bound_contract(tmp_path, resumable_workspace, frozen_clock, generated_delta, deploy_delta, expected):
+    _write_json(tmp_path / "specs" / "cost-manifest.json", {
+        "schema_version": "1.0",
+        "generated_at": (frozen_clock + timedelta(seconds=generated_delta)).isoformat(),
+    })
+    state = {"cost_projection": {"last_deploy_at": (frozen_clock + timedelta(seconds=deploy_delta)).isoformat()}}
+    assert orch._check_cost_projection(tmp_path, state).decision == expected
+
+
+@pytest.mark.parametrize("passed_at", INVALID_FIELD_JSON + ["1900-01-01T00:00:00Z"])
+def test_cost_passed_at_remains_audit_only(tmp_path, resumable_workspace, passed_at):
+    resumable_workspace["cost_projection"]["passed_at"] = passed_at
+    assert orch._check_cost_projection(tmp_path, resumable_workspace).decision == "skip"
+
+
+@pytest.mark.parametrize("timestamp", [
+    "2026-09-06T12:00:00Z", "2026-09-06t12:00:00z", "2026-09-06T14:00:00+02:00",
+    "2026-09-06T07:00:00-05:00", "2026-09-06T12:00:00.000000Z",
+])
+def test_timestamp_parser_preserves_valid_offsets(frozen_clock, timestamp):
+    assert orch._parse_iso(timestamp) == frozen_clock
 
 
 # ---------------------------------------------------------------------------

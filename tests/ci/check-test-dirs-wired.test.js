@@ -3,14 +3,16 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { readText, pythonExecutable } = require('../blueprint/test-portability.js');
 
 const repoRoot = path.join(__dirname, '../..');
 const CHECKER = path.join('scripts', 'ci', 'check-test-dirs-wired.py');
 const WORKFLOW = path.join('.github', 'workflows', 'python-pytest.yml');
 const GOVERNED_ACTIONS_TESTS = 'skills/threadlight-governed-actions/tests';
+const GOVERNED_ACTIONS_STEP = /- name: Test threadlight-governed-actions\n\s+run: python -m pytest skills\/threadlight-governed-actions\/tests -q/;
 
 function runChecker(root) {
-  return spawnSync('python3', [path.join(root, CHECKER)], {
+  return spawnSync(pythonExecutable(), [path.join(root, CHECKER)], {
     cwd: root,
     encoding: 'utf8',
   });
@@ -35,7 +37,7 @@ function withFixtureRoot(mutateWorkflow, body) {
       fs.writeFileSync(path.join(suiteDir, 'test_fixture.py'), 'def test_fixture():\n    assert True\n');
     }
 
-    const workflow = mutateWorkflow(fs.readFileSync(path.join(repoRoot, WORKFLOW), 'utf8'));
+    const workflow = mutateWorkflow(readText(path.join(repoRoot, WORKFLOW)));
     fs.writeFileSync(path.join(fixtureRoot, WORKFLOW), workflow);
 
     body(fixtureRoot);
@@ -50,40 +52,64 @@ test('the real repository has every pytest suite wired into python-pytest.yml', 
   assert.match(result.stdout, new RegExp(GOVERNED_ACTIONS_TESTS));
 });
 
-test('omitting skills/threadlight-governed-actions/tests from the workflow fails the checker', () => {
-  withFixtureRoot(
-    (workflow) =>
-      workflow
-        .split('\n')
-        .filter((line) => !line.includes(GOVERNED_ACTIONS_TESTS))
-        .join('\n'),
-    (fixtureRoot) => {
-      const result = runChecker(fixtureRoot);
-      assert.strictEqual(result.status, 1, `expected exit 1, got ${result.status}\n${result.stdout}`);
-      assert.match(result.stderr, new RegExp(`- ${GOVERNED_ACTIONS_TESTS}`));
-    },
-  );
-});
+for (const [platform, defaultExecutable] of [['win32', 'python'], ['linux', 'python3'], ['darwin', 'python3']]) {
+  test(`Python launcher uses ${defaultExecutable} by default on ${platform}`, () => {
+    assert.strictEqual(pythonExecutable({}, platform), defaultExecutable);
+    assert.strictEqual(pythonExecutable({ PYTHON: '' }, platform), defaultExecutable);
+  });
 
-test('keeping the governed-actions step wired passes the same fixture', () => {
-  withFixtureRoot(
-    (workflow) => workflow,
-    (fixtureRoot) => {
-      const result = runChecker(fixtureRoot);
-      assert.strictEqual(
-        result.status,
-        0,
-        `expected exit 0, got ${result.status}\n${result.stdout}\n${result.stderr}`,
-      );
-      assert.match(result.stdout, new RegExp(GOVERNED_ACTIONS_TESTS));
-    },
-  );
-});
+  test(`Python launcher honors PYTHON over the ${platform} default`, () => {
+    const executable = platform === 'win32'
+      ? 'C:\\Custom Python\\python.exe'
+      : '/opt/custom python/bin/python3';
+    assert.strictEqual(pythonExecutable({ PYTHON: executable }, platform), executable);
+  });
+}
+
+for (const [label, eol] of [['LF', '\n'], ['CRLF', '\r\n']]) {
+  test(`omitting skills/threadlight-governed-actions/tests from a ${label} workflow fails the checker`, () => {
+    withFixtureRoot(
+      (workflow) =>
+        workflow
+          .split('\n')
+          .filter((line) => !line.includes(GOVERNED_ACTIONS_TESTS))
+          .join(eol),
+      (fixtureRoot) => {
+        const workflow = readText(path.join(fixtureRoot, WORKFLOW));
+        assert.doesNotMatch(workflow, GOVERNED_ACTIONS_STEP);
+        const result = runChecker(fixtureRoot);
+        assert.strictEqual(result.status, 1, `expected exit 1, got ${result.status}\n${result.stdout}`);
+        assert.match(result.stderr, new RegExp(`- ${GOVERNED_ACTIONS_TESTS}`));
+      },
+    );
+  });
+
+  test(`keeping the governed-actions step wired passes the ${label} fixture`, () => {
+    withFixtureRoot(
+      (workflow) => workflow.replace(/\n/g, eol),
+      (fixtureRoot) => {
+        const workflowPath = path.join(fixtureRoot, WORKFLOW);
+        const raw = fs.readFileSync(workflowPath, 'utf8');
+        assert.ok(raw.includes(eol), `fixture must contain ${label} line endings`);
+        const workflow = readText(workflowPath);
+        assert.strictEqual(workflow, raw.split(eol).join('\n'));
+        assert.match(workflow, GOVERNED_ACTIONS_STEP);
+        const result = runChecker(fixtureRoot);
+        assert.strictEqual(
+          result.status,
+          0,
+          `expected exit 0, got ${result.status}\n${result.stdout}\n${result.stderr}`,
+        );
+        assert.match(result.stdout, new RegExp(GOVERNED_ACTIONS_TESTS));
+      },
+    );
+  });
+}
 
 test('python-pytest.yml runs the governed-actions suite as its own explicit step', () => {
-  const workflow = fs.readFileSync(path.join(repoRoot, WORKFLOW), 'utf8');
+  const workflow = readText(path.join(repoRoot, WORKFLOW));
   assert.match(
     workflow,
-    /- name: Test threadlight-governed-actions\n\s+run: python -m pytest skills\/threadlight-governed-actions\/tests -q/,
+    GOVERNED_ACTIONS_STEP,
   );
 });

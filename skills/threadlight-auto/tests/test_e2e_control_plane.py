@@ -20,6 +20,11 @@ deploying an agent it overlays a production-ready pilot fixture with the
 three legs' green fixtures, runs each leg's real CLI, then asserts the
 scorecard actually *consumes* and *joins* their manifests.
 
+Bicep entrypoints are excluded from this fixture: compilation is covered by
+the production-readiness compiler tests, not this manifest-join smoke. Module
+sources remain for static alert/KPI checks. The real assessor reports no
+compiled infrastructure rather than receiving a fabricated resource graph.
+
 The unit-cost side of that join is a **measured** cost per successful
 interaction, so the pilot is seeded with a hash-chained
 forecast + actuals + reconciliation bundle (`threadlight-consumption-iq`'s
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -185,24 +191,35 @@ def _build_combined_repo(tmp: pathlib.Path) -> pathlib.Path:
     """Overlay a production-ready pilot with the three legs' green fixtures,
     the way a real onboarded pilot repo would carry all of them at once."""
     root = tmp / "pilot"
-    shutil.copytree(PR_FIXTURE, root)
+    ignore_entrypoints = shutil.ignore_patterns("main.bicep")
+    shutil.copytree(PR_FIXTURE, root, ignore=ignore_entrypoints)
     for fixture in (GOVERN_FIXTURE, EVALS_FIXTURE, REDTEAM_FIXTURE):
         for child in fixture.iterdir():
             dest = root / child.name
             if child.is_dir():
-                shutil.copytree(child, dest, dirs_exist_ok=True)
-            else:
+                shutil.copytree(child, dest, dirs_exist_ok=True, ignore=ignore_entrypoints)
+            elif child.name != "main.bicep":
                 shutil.copy(child, dest)
     # consumption-iq's artefacts — present in a real pilot, seeded here so the
     # scorecard can join the measured unit cost alongside eval quality.
     _seed_reconciled_cost(root)
+    # Supply the assessor's explicit prose contract without relying on unrelated
+    # KPI words in a compilation entrypoint that this offline fixture excludes.
+    docs = root / "docs"
+    docs.mkdir(exist_ok=True)
+    (docs / "outcome-kpi-baselines.md").write_text(
+        "# Outcome KPI baselines\n\n"
+        "A deviation alert monitors evaluation pass-rate against its baseline.\n",
+        encoding="utf-8",
+    )
     return root
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, *args],
-        capture_output=True, text=True, timeout=180,
+        capture_output=True, text=True, encoding="utf-8", timeout=180,
+        env={**os.environ, "PYTHONUTF8": "1"},
     )
 
 
@@ -230,7 +247,7 @@ def _run_scorecard(root: pathlib.Path) -> dict:
     )
     assert r.returncode == 0, f"production-ready failed:\n{r.stdout}\n{r.stderr}"
     assert out.exists(), "scorecard manifest not written"
-    return json.loads(out.read_text())
+    return json.loads(out.read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------
@@ -239,11 +256,13 @@ def _run_scorecard(root: pathlib.Path) -> dict:
 
 def test_legs_emit_passing_manifests(tmp_path):
     root = _build_combined_repo(tmp_path)
+    assert not list(root.rglob("main.bicep")), "offline fixture must not require Bicep compilation"
+    assert list(root.rglob("*.bicep")), "static module evidence must remain available"
     _emit_legs(root)
 
-    govern = json.loads((root / "specs" / "govern-manifest.json").read_text())
-    evals = json.loads((root / "specs" / "evals-manifest.json").read_text())
-    redteam = json.loads((root / "specs" / "redteam-manifest.json").read_text())
+    govern = json.loads((root / "specs" / "govern-manifest.json").read_text(encoding="utf-8"))
+    evals = json.loads((root / "specs" / "evals-manifest.json").read_text(encoding="utf-8"))
+    redteam = json.loads((root / "specs" / "redteam-manifest.json").read_text(encoding="utf-8"))
 
     # govern's verdict vocabulary is ungoverned / partial / governed
     # (renamed from "wired" in #95 — AGT realignment).
@@ -272,10 +291,10 @@ def test_scorecard_joins_outcome_kpis(tmp_path):
     # the unit cost is the *measured* one, read out of the reconciled actuals
     # bundle, not the forecast in specs/cost-manifest.json
     assert abs(kpi["cost_per_interaction_usd"] - SEEDED_COST_PER_INTERACTION) < 1e-6
-    # baselines + deviation alert declared by the citadel pilot fixture
+    # The offline fixture explicitly declares the deviation alert.
     assert kpi["deviation_alert_present"] is True
 
-    report = (root / "docs" / "pr-report.md").read_text()
+    report = (root / "docs" / "pr-report.md").read_text(encoding="utf-8")
     assert "## 8. Outcome KPI scorecard" in report
     assert "91%" in report
     assert "$0.0123" in report

@@ -7,6 +7,12 @@ decide what can resume; it does **not** write or migrate
 writes `.threadlight/auto-next.json` for the coding agent to consume. Format:
 pretty-printed JSON written by the guidance/agent side.
 
+The root and any present known stage entries must be JSON objects. Missing
+state remains a supported first/manual run; unreadable, invalid-JSON, or
+non-object state instead warns and forces re-runs. Malformed known stage
+entries force the affected stage and downstream stages to re-run. Unknown
+keys remain untouched, and the planner never repairs or overwrites this file.
+
 > **Schema.** Stage names are `preflight / design / deploy / safe_check /
 > cost_projection / invoke`; primary artifact paths are `specs/SPEC.md`,
 > `tests/postdeploy-manifest.json`, `specs/cost-manifest.json`,
@@ -58,6 +64,13 @@ pretty-printed JSON written by the guidance/agent side.
 
 ### Per-stage `artifact_hash` semantics
 
+Design may omit `artifact_hash` for an existing manually written SPEC; that
+retains the manual-write skip unless clarification markers are present.
+A recorded Design hash must be a 64-character hexadecimal SHA-256 string:
+`null`, empty strings, and other unusable values force a re-run, not a manual
+skip. Preflight's separate marker still permits `foundation_sha256: null`
+while Foundation is absent.
+
 | Stage | Primary artifact hashed | Why |
 |---|---|---|
 | preflight | `.threadlight/preflight-passed.json` | Marker freshness |
@@ -73,6 +86,17 @@ pretty-printed JSON written by the guidance/agent side.
 ### Cost-projection fields
 
 `orchestrator.py::_check_cost_projection` uses the stage's `last_deploy_at` (fallback: `azd env`'s `AZURE_LAST_DEPLOY_AT`) together with `specs/cost-manifest.json.generated_at` to decide whether the existing forecast can be reused instead of re-running `scripts/consumption_iq.py run --all`. The planner trusts the manifest's `generated_at` vs the deploy marker for this decision. The `cost_projection.passed_at` entry is recorded by guidance for auditing/echoing only and is not consulted by `_check_cost_projection` to decide skip/run.
+
+The environment fallback applies when `last_deploy_at` is absent. A present
+but unusable value (including `null` or an empty string) forces a re-run rather
+than silently falling back to a different deploy marker.
+
+Preflight and Invoke use filesystem mtime; Evals, Red-team, and Govern use
+`captured_at`. These automatic evidence windows require `0 <= age < 24 h`.
+Future timestamps and the exact 24-hour boundary are not fresh. Invoke
+additionally requires a regular `docs/invoke-results.md` file. Cost's distinct
+`generated_at > last_deploy_at` comparison and manual-envelope contracts are
+unchanged.
 
 The stage entry may also carry a `cost-reconciliation` status
 (`pass` / `degraded-source` / `not-verified`) when the optional actuals
